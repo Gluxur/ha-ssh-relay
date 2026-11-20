@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+import contextlib
+import dataclasses
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 
 import asyncssh
@@ -15,6 +19,15 @@ FORWARD_TIMEOUT = 30
 KEEPALIVE_COUNT_MAX = 3
 HOST_KEY_ALGS = ["ssh-ed25519"]
 REMOTE_LISTEN_HOST = "127.0.0.1"
+CLOSE_TIMEOUT = 5
+
+STATE_CONNECTING = "connecting"
+STATE_CONNECTED = "connected"
+STATE_RECONNECTING = "reconnecting"
+STATE_DISCONNECTED = "disconnected"
+STATE_ERROR = "error"
+STATE_WAITING = "waiting_for_relay"
+STATE_HOST_KEY_MISMATCH = "host_key_mismatch"
 
 
 @dataclass(frozen=True)
@@ -93,6 +106,13 @@ async def _probe_fingerprint(cfg: RelayConfig) -> str | None:
     return key.get_fingerprint("sha256") if key is not None else None
 
 
+async def _close(conn: asyncssh.SSHClientConnection) -> None:
+    """Close the connection and wait (bounded) for it to be fully closed."""
+    conn.close()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(conn.wait_closed(), CLOSE_TIMEOUT)
+
+
 async def open_tunnel(
     cfg: RelayConfig,
 ) -> tuple[asyncssh.SSHClientConnection, asyncssh.SSHListener, str]:
@@ -118,9 +138,12 @@ async def open_tunnel(
                 keepalive_interval=cfg.keepalive,
                 keepalive_count_max=KEEPALIVE_COUNT_MAX,
                 login_timeout=CONNECT_TIMEOUT,
-                # Only the configured key: no ~/.ssh/config, no agent.
+                # Only the configured key: no ~/.ssh/config, no agent, no
+                # GSSAPI, and public key authentication only.
                 config=None,
                 agent_path=None,
+                gss_host=None,
+                preferred_auth="publickey",
             ),
             CONNECT_TIMEOUT,
         )
@@ -143,15 +166,18 @@ async def open_tunnel(
             FORWARD_TIMEOUT,
         )
     except asyncssh.ChannelListenError as err:
-        conn.close()
-        await conn.wait_closed()
+        await _close(conn)
         _LOGGER.warning(
             "Relay refused forward of %s:%s: %s: %s",
             REMOTE_LISTEN_HOST, cfg.remote_port, type(err).__name__, err,
         )
         raise ForwardRefused(str(err)) from err
-    except BaseException:
+    except asyncio.CancelledError:
+        # Do not await anything while being cancelled.
         conn.close()
+        raise
+    except BaseException:
+        await _close(conn)
         raise
 
     _LOGGER.info(
@@ -160,3 +186,136 @@ async def open_tunnel(
         cfg.local_host, cfg.local_port,
     )
     return conn, listener, host_key
+
+
+class TunnelRunner:
+    """Keep the reverse tunnel open until cancelled, reporting its state.
+
+    `on_state(state)` is called on every state change. `on_pinned(key)` is
+    called once, with the relay host public key, after the first successful
+    connection made without a pinned key; that key is then used for every
+    later attempt.
+    """
+
+    def __init__(
+        self,
+        cfg: RelayConfig,
+        on_state: Callable[[str], None],
+        on_pinned: Callable[[str], None],
+        *,
+        waiting_delay: float = 30,
+        auth_retry_delay: float = 300,
+        max_backoff: float = 60,
+    ) -> None:
+        self._cfg = cfg
+        self._on_state = on_state
+        self._on_pinned = on_pinned
+        self._waiting_delay = waiting_delay
+        self._auth_retry_delay = auth_retry_delay
+        self._max_backoff = max_backoff
+        self._ever_connected = False
+        self.state: str = STATE_DISCONNECTED
+        self.reconnect_count: int = 0
+        self.connected_at: datetime | None = None
+        self.host_key: str | None = cfg.host_key
+        self.last_error: str | None = None
+
+    def _set_state(self, state: str) -> None:
+        self.state = state
+        self.connected_at = (
+            datetime.now(timezone.utc) if state == STATE_CONNECTED else None
+        )
+        try:
+            self._on_state(state)
+        except Exception:  # noqa: BLE001 - a callback must not kill the loop
+            _LOGGER.exception("on_state callback failed")
+
+    def _pin(self, key: str) -> None:
+        if self.host_key is not None or not key:
+            return
+        self.host_key = key
+        self._cfg = dataclasses.replace(self._cfg, host_key=key)
+        _LOGGER.info("Pinned relay host key %s", fingerprint(key))
+        try:
+            self._on_pinned(key)
+        except Exception:  # noqa: BLE001 - a callback must not kill the loop
+            _LOGGER.exception("on_pinned callback failed")
+
+    def _next_backoff(self, backoff: float) -> float:
+        return min(backoff * 2, self._max_backoff)
+
+    async def run(self) -> None:
+        """Loop until cancelled; the state is `disconnected` on exit."""
+        initial_backoff = min(1, self._max_backoff)
+        backoff = initial_backoff
+        try:
+            while True:
+                self._set_state(STATE_CONNECTING)
+                try:
+                    conn, listener, seen_key = await open_tunnel(self._cfg)
+                except HostKeyMismatch as err:
+                    self.last_error = f"expected {err.expected} got {err.actual}"
+                    state, delay = STATE_HOST_KEY_MISMATCH, self._auth_retry_delay
+                except asyncssh.PermissionDenied as err:
+                    self.last_error = f"permission denied: {err}"
+                    if not self._ever_connected and self._cfg.host_key is None:
+                        # Fresh install: the key is not on the relay yet.
+                        state, delay = STATE_WAITING, self._waiting_delay
+                    else:
+                        _LOGGER.error(
+                            "Relay %s:%s rejected the key for %s",
+                            self._cfg.host, self._cfg.ssh_port, self._cfg.username,
+                        )
+                        state, delay = STATE_ERROR, self._auth_retry_delay
+                except ForwardRefused as err:
+                    self.last_error = f"forward refused: {err}"
+                    state, delay = STATE_ERROR, self._auth_retry_delay
+                except (TimeoutError, OSError, asyncssh.Error) as err:
+                    self.last_error = f"{type(err).__name__}: {err}"
+                    _LOGGER.warning("Relay connection failed: %s", self.last_error)
+                    state, delay = STATE_RECONNECTING, backoff
+                    backoff = self._next_backoff(backoff)
+                except Exception as err:  # noqa: BLE001 - never die silently
+                    self.last_error = f"{type(err).__name__}: {err}"
+                    _LOGGER.exception("Unexpected relay tunnel error")
+                    state, delay = STATE_RECONNECTING, backoff
+                    backoff = self._next_backoff(backoff)
+                else:
+                    self._ever_connected = True
+                    self.last_error = None
+                    self._pin(seen_key)
+                    await self._hold(conn, listener)
+                    backoff = initial_backoff
+                    state, delay = STATE_RECONNECTING, backoff
+                    backoff = self._next_backoff(backoff)
+
+                self._set_state(state)
+                self.reconnect_count += 1
+                _LOGGER.debug(
+                    "Retrying in %ss (attempt #%s)", delay, self.reconnect_count
+                )
+                await asyncio.sleep(delay)
+        finally:
+            self._set_state(STATE_DISCONNECTED)
+
+    async def _hold(
+        self, conn: asyncssh.SSHClientConnection, listener: asyncssh.SSHListener
+    ) -> None:
+        """Report `connected`, then wait for the listener or the connection to close."""
+        waiters: set[asyncio.Future] = set()
+        try:
+            self._set_state(STATE_CONNECTED)
+            waiters = {
+                asyncio.ensure_future(listener.wait_closed()),
+                asyncio.ensure_future(conn.wait_closed()),
+            }
+            await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            # Do not await anything while being cancelled.
+            conn.close()
+            raise
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+        _LOGGER.warning("Relay tunnel closed")
+        await _close(conn)

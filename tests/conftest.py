@@ -51,6 +51,11 @@ class RelayServer:
         self._acceptor: asyncssh.SSHAcceptor | None = None
         self._conns: set[asyncssh.SSHServerConnection] = set()
 
+    @property
+    def open_connections(self) -> int:
+        """Number of client connections currently open on the server."""
+        return len(self._conns)
+
     def _make_server(self) -> asyncssh.SSHServer:
         relay = self
 

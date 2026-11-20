@@ -116,3 +116,7 @@ async def test_forward_refused(relay_server):
     with pytest.raises(tunnel.ForwardRefused):
         await tunnel.open_tunnel(_config(relay_server, priv, _free_port()))
     assert relay_server.active_listens == set()
+    # The client closed its side: the server must not keep a connection around.
+    async with asyncio.timeout(5):
+        while relay_server.open_connections:
+            await asyncio.sleep(0.01)
