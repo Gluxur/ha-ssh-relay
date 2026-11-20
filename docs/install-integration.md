@@ -20,9 +20,8 @@ generates the key the relay needs.
 
 ### HACS (recommended)
 
-1. HACS → ⋮ → **Custom repositories** → repository
-   `https://github.com/Gluxur/ha-ssh-relay`, type **Integration** → **Add**.
-2. Open **SSH Relay** in HACS → **Download**.
+1. In HACS, search for **SSH Relay** (it is in the default list).
+2. Open it → **Download**.
 3. Restart Home Assistant.
 
 HACS then offers new releases as updates.
