@@ -12,7 +12,12 @@ from conftest import load_tunnel
 
 tunnel = load_tunnel()
 
-FAST = {"waiting_delay": 0.05, "auth_retry_delay": 0.05, "max_backoff": 0.05}
+FAST = {
+    "waiting_delay": 0.05,
+    "auth_retry_delay": 0.05,
+    "forward_retry_delay": 0.05,
+    "max_backoff": 0.05,
+}
 
 
 def _free_port() -> int:
@@ -120,6 +125,9 @@ async def test_host_key_change_blocks(relay_server, echo_server):
         assert runner.host_key == pinned
         assert "expected" in runner.last_error and "got" in runner.last_error
         assert tunnel.fingerprint(pinned) in runner.last_error
+        assert runner.last_mismatch is not None
+        assert runner.last_mismatch.actual_key == relay_server.host_key_public
+        assert runner.last_mismatch.actual == tunnel.fingerprint(relay_server.host_key_public)
         # The retry still uses the pinned key: it fails the same way, never connects.
         await rec.wait_state("host_key_mismatch", after=mismatch + 1)
         assert "connected" not in rec.states[first + 1 :]
@@ -164,8 +172,12 @@ async def test_permission_denied_with_configured_key_is_error(relay_server):
 async def test_forward_refused_backs_off(relay_server):
     cfg, _pub, _port = _setup(relay_server, allow=False)
     rec = Recorder()
-    async with running(cfg, rec, auth_retry_delay=0.1) as (runner, _task):
-        await rec.wait_state("error")
+    # A refused forward waits forward_retry_delay, not auth_retry_delay.
+    async with running(
+        cfg, rec, auth_retry_delay=60, forward_retry_delay=0.1
+    ) as (runner, _task):
+        first = await rec.wait_state("error")
+        await rec.wait_state("error", after=first + 1, timeout=2)
         start = relay_server.auth_attempts
         await asyncio.sleep(0.3)
         assert relay_server.auth_attempts - start <= 4
@@ -188,3 +200,23 @@ async def test_cancel_sets_disconnected(relay_server, echo_server):
     assert runner.connected_at is None
     await wait_until(lambda: relay_server.open_connections == 0)
     assert relay_server.active_listens == set()
+
+
+async def test_mismatch_unknown_key_text(relay_server, monkeypatch):
+    """A failed probe reports "unknown", never "None"."""
+    cfg, _pub, _port = _setup(relay_server)
+    _other_priv, other_pub = tunnel.generate_keypair()
+    cfg = dataclasses.replace(cfg, host_key=other_pub)
+
+    async def no_key(_cfg):
+        return None
+
+    monkeypatch.setattr(tunnel, "_probe_host_key", no_key)
+    rec = Recorder()
+    async with running(cfg, rec) as (runner, _task):
+        await rec.wait_state("host_key_mismatch")
+        assert runner.last_mismatch.actual is None
+        assert runner.last_mismatch.actual_key is None
+        assert "None" not in runner.last_error
+        assert runner.last_error.endswith("got unknown")
+        assert "got unknown" in str(runner.last_mismatch)

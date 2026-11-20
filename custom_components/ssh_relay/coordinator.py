@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_KEEPALIVE,
     DOMAIN,
     ISSUE_HOST_KEY_CHANGED,
+    ISSUE_HOST_KEY_CHANGED_UNKNOWN,
     STOP_TIMEOUT,
     issue_id,
     relay_username,
@@ -148,22 +149,30 @@ class RelayCoordinator:
     def _raise_host_key_issue(self) -> None:
         data = self.entry.data
         expected = safe_fingerprint(data.get(CONF_HOST_KEY)) or "?"
-        # TunnelRunner reports a mismatch as "expected <fp> got <fp>".
-        error = self._runner.last_error or ""
-        actual = error.rpartition(" got ")[2] if " got " in error else "?"
+        mismatch = self._runner.last_mismatch
+        actual_key = mismatch.actual_key if mismatch is not None else None
+        actual = safe_fingerprint(actual_key)
+        placeholders = {
+            "host": f"{data[CONF_RELAY_HOST]}:{data[CONF_SSH_PORT]}",
+            "expected": expected,
+        }
+        if actual is not None:
+            placeholders["actual"] = actual
+        else:
+            actual_key = None
         ir.async_create_issue(
             self.hass,
             DOMAIN,
             issue_id(self.entry.entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.ERROR,
-            translation_key=ISSUE_HOST_KEY_CHANGED,
-            translation_placeholders={
-                "host": f"{data[CONF_RELAY_HOST]}:{data[CONF_SSH_PORT]}",
-                "expected": expected,
-                "actual": actual,
-            },
-            data={"entry_id": self.entry.entry_id},
+            # Without the presented key, the translation says "unknown".
+            translation_key=(
+                ISSUE_HOST_KEY_CHANGED if actual else ISSUE_HOST_KEY_CHANGED_UNKNOWN
+            ),
+            translation_placeholders=placeholders,
+            # The repair pins exactly the key shown (None: re-pin on next connect).
+            data={"entry_id": self.entry.entry_id, "host_key": actual_key},
         )
 
     # Lifecycle.

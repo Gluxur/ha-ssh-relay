@@ -37,6 +37,8 @@ TEST_TIMEOUT = 15
 STOP_TIMEOUT = 5
 
 ISSUE_HOST_KEY_CHANGED = "host_key_changed"
+# Same issue, when the key the relay presented could not be read.
+ISSUE_HOST_KEY_CHANGED_UNKNOWN = "host_key_changed_unknown"
 
 
 def relay_username(tenant: str) -> str:

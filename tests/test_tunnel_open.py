@@ -94,6 +94,7 @@ async def test_pinned_key_mismatch_raises(relay_server):
 
     assert exc_info.value.expected == tunnel.fingerprint(other_pub)
     assert exc_info.value.actual == tunnel.fingerprint(relay_server.host_key_public)
+    assert exc_info.value.actual_key == relay_server.host_key_public
     assert relay_server.auth_attempts == 0
     assert relay_server.active_listens == set()
 

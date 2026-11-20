@@ -58,10 +58,17 @@ class RelayConfig:
 class HostKeyMismatch(Exception):
     """The relay presented a host key other than the pinned one."""
 
-    def __init__(self, expected: str, actual: str | None) -> None:
-        super().__init__(f"relay host key mismatch: expected {expected}, got {actual}")
+    def __init__(
+        self, expected: str, actual: str | None, actual_key: str | None = None
+    ) -> None:
+        super().__init__(
+            f"relay host key mismatch: expected {expected}, got {actual or 'unknown'}"
+        )
         self.expected = expected
+        # Fingerprint and OpenSSH public key of the key presented, None if the
+        # probe could not read it.
         self.actual = actual
+        self.actual_key = actual_key
 
 
 class ForwardRefused(Exception):
@@ -85,8 +92,8 @@ def _export_public(key: asyncssh.SSHKey) -> str:
     return key.export_public_key("openssh").decode().strip()
 
 
-async def _probe_fingerprint(cfg: RelayConfig) -> str | None:
-    """Read the relay's host key fingerprint without authenticating."""
+async def _probe_host_key(cfg: RelayConfig) -> str | None:
+    """Read the relay's host public key (OpenSSH format) without authenticating."""
     try:
         key = await asyncio.wait_for(
             asyncssh.get_server_host_key(
@@ -103,7 +110,7 @@ async def _probe_fingerprint(cfg: RelayConfig) -> str | None:
             cfg.host, cfg.ssh_port, type(err).__name__, err,
         )
         return None
-    return key.get_fingerprint("sha256") if key is not None else None
+    return _export_public(key) if key is not None else None
 
 
 async def _close(conn: asyncssh.SSHClientConnection) -> None:
@@ -149,12 +156,13 @@ async def open_tunnel(
         )
     except asyncssh.HostKeyNotVerifiable as err:
         expected = fingerprint(cfg.host_key) if cfg.host_key else ""
-        actual = await _probe_fingerprint(cfg)
+        actual_key = await _probe_host_key(cfg)
+        actual = fingerprint(actual_key) if actual_key else None
         _LOGGER.warning(
             "Relay %s:%s host key mismatch: expected %s, got %s",
-            cfg.host, cfg.ssh_port, expected, actual,
+            cfg.host, cfg.ssh_port, expected, actual or "unknown",
         )
-        raise HostKeyMismatch(expected, actual) from err
+        raise HostKeyMismatch(expected, actual, actual_key) from err
 
     try:
         server_key = conn.get_server_host_key()
@@ -205,6 +213,7 @@ class TunnelRunner:
         *,
         waiting_delay: float = 30,
         auth_retry_delay: float = 300,
+        forward_retry_delay: float = 60,
         max_backoff: float = 60,
     ) -> None:
         self._cfg = cfg
@@ -212,6 +221,9 @@ class TunnelRunner:
         self._on_pinned = on_pinned
         self._waiting_delay = waiting_delay
         self._auth_retry_delay = auth_retry_delay
+        # Shorter than auth_retry_delay: a refused forward is usually the
+        # previous session still holding the port on the relay.
+        self._forward_retry_delay = forward_retry_delay
         self._max_backoff = max_backoff
         self._ever_connected = False
         self.state: str = STATE_DISCONNECTED
@@ -219,6 +231,8 @@ class TunnelRunner:
         self.connected_at: datetime | None = None
         self.host_key: str | None = cfg.host_key
         self.last_error: str | None = None
+        # Last host key mismatch seen, until the next successful connection.
+        self.last_mismatch: HostKeyMismatch | None = None
 
     def _set_state(self, state: str) -> None:
         self.state = state
@@ -254,7 +268,10 @@ class TunnelRunner:
                 try:
                     conn, listener, seen_key = await open_tunnel(self._cfg)
                 except HostKeyMismatch as err:
-                    self.last_error = f"expected {err.expected} got {err.actual}"
+                    self.last_mismatch = err
+                    self.last_error = (
+                        f"expected {err.expected} got {err.actual or 'unknown'}"
+                    )
                     state, delay = STATE_HOST_KEY_MISMATCH, self._auth_retry_delay
                 except asyncssh.PermissionDenied as err:
                     self.last_error = f"permission denied: {err}"
@@ -269,7 +286,7 @@ class TunnelRunner:
                         state, delay = STATE_ERROR, self._auth_retry_delay
                 except ForwardRefused as err:
                     self.last_error = f"forward refused: {err}"
-                    state, delay = STATE_ERROR, self._auth_retry_delay
+                    state, delay = STATE_ERROR, self._forward_retry_delay
                 except (TimeoutError, OSError, asyncssh.Error) as err:
                     self.last_error = f"{type(err).__name__}: {err}"
                     _LOGGER.warning("Relay connection failed: %s", self.last_error)
@@ -283,6 +300,7 @@ class TunnelRunner:
                 else:
                     self._ever_connected = True
                     self.last_error = None
+                    self.last_mismatch = None
                     self._pin(seen_key)
                     await self._hold(conn, listener)
                     backoff = initial_backoff

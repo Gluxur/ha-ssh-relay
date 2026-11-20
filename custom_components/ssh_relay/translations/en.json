@@ -115,7 +115,18 @@
         "step": {
           "confirm": {
             "title": "Accept the new relay host key?",
-            "description": "The relay {host} presented the host key {actual}, but {expected} is pinned. The tunnel stays closed.\n\nIf you reinstalled the relay, accept: the next connection pins the new key. Otherwise, someone may be impersonating the relay: do not accept."
+            "description": "The relay {host} presented the host key {actual}, but {expected} is pinned. The tunnel stays closed.\n\nIf you reinstalled the relay, accept: the key {actual} is pinned. Otherwise, someone may be impersonating the relay: do not accept."
+          }
+        }
+      }
+    },
+    "host_key_changed_unknown": {
+      "title": "The SSH relay host key changed",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Accept the new relay host key?",
+            "description": "The relay {host} presented a host key other than the pinned {expected}, but it could not be read (unknown). The tunnel stays closed.\n\nIf you reinstalled the relay, accept: the next connection pins the key the relay presents. Otherwise, someone may be impersonating the relay: do not accept."
           }
         }
       }

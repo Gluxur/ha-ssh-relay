@@ -115,7 +115,18 @@
         "step": {
           "confirm": {
             "title": "Accepter la nouvelle clé hôte du relais ?",
-            "description": "Le relais {host} a présenté la clé hôte {actual}, alors que {expected} est épinglée. Le tunnel reste fermé.\n\nSi vous avez réinstallé le relais, acceptez : la prochaine connexion épinglera la nouvelle clé. Sinon, quelqu'un se fait peut-être passer pour le relais : n'acceptez pas."
+            "description": "Le relais {host} a présenté la clé hôte {actual}, alors que {expected} est épinglée. Le tunnel reste fermé.\n\nSi vous avez réinstallé le relais, acceptez : la clé {actual} sera épinglée. Sinon, quelqu'un se fait peut-être passer pour le relais : n'acceptez pas."
+          }
+        }
+      }
+    },
+    "host_key_changed_unknown": {
+      "title": "La clé hôte du relais SSH a changé",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Accepter la nouvelle clé hôte du relais ?",
+            "description": "Le relais {host} a présenté une clé hôte autre que {expected} (épinglée), mais elle n'a pas pu être lue (inconnue). Le tunnel reste fermé.\n\nSi vous avez réinstallé le relais, acceptez : la prochaine connexion épinglera la clé présentée par le relais. Sinon, quelqu'un se fait peut-être passer pour le relais : n'acceptez pas."
           }
         }
       }

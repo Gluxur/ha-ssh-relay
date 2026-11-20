@@ -19,7 +19,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: SshRelayConfigEntry) -> 
     if entry.options.get(CONF_ENABLED, True):
         coordinator.start()
 
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except BaseException:
+        # No unload will follow a failed setup: do not leave the tunnel running.
+        await coordinator.stop()
+        raise
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
