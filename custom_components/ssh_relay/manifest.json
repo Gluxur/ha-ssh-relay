@@ -1,0 +1,17 @@
+{
+  "domain": "ssh_relay",
+  "name": "SSH Relay",
+  "codeowners": [
+    "@Gluxur"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/Gluxur/ha-ssh-relay",
+  "integration_type": "service",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/Gluxur/ha-ssh-relay/issues",
+  "requirements": [
+    "asyncssh>=2.14.0"
+  ],
+  "version": "0.1.0"
+}

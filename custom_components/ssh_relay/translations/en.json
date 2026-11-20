@@ -1,0 +1,124 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to an SSH relay",
+        "description": "Home Assistant opens a reverse SSH tunnel to the relay VM as user `relay-<tenant>`, authenticated with a key generated on the next step. No password is used.",
+        "data": {
+          "relay_host": "Relay host",
+          "ssh_port": "SSH port",
+          "tenant": "Tenant name",
+          "remote_port": "Port on the relay",
+          "local_host": "Local host",
+          "local_port": "Local port",
+          "keepalive": "Keepalive interval (seconds)"
+        },
+        "data_description": {
+          "relay_host": "IP address or hostname of the relay VM.",
+          "tenant": "Lowercase letters, digits and dashes, up to 24 characters. Same name as in the relay's tenants file.",
+          "remote_port": "Port reserved for this tenant on the relay (18000-18999).",
+          "local_host": "Where the relay traffic goes. Usually `homeassistant` on Home Assistant OS.",
+          "local_port": "Usually 8123.",
+          "keepalive": "Between 5 and 300 seconds."
+        }
+      },
+      "key": {
+        "title": "Add the key to the relay",
+        "description": "Add this tenant to the relay's tenants file, then run `relay-setup.sh` on the relay. Replace the domain with the name you reach Home Assistant at.\n\n```\n{tenant_snippet}\n```\n\nPublic key:\n\n```\n{public_key}\n```\n\nSubmit to test the connection. The relay host key seen now is then pinned."
+      },
+      "key_failed": {
+        "title": "Connection test failed",
+        "description": "{reason}\n\nTenant entry for the relay:\n\n```\n{tenant_snippet}\n```\n\nPublic key: `{public_key}`\n\nTest again, or save anyway: the tunnel then waits for the relay to know the key and pins the host key on the first connection.",
+        "menu_options": {
+          "key": "Test again",
+          "save": "Save anyway"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "Enter the relay host.",
+      "invalid_tenant": "Lowercase letters, digits and dashes only, 1 to 24 characters.",
+      "invalid_auth": "The relay rejected the key: it is not on the relay yet. Add the tenant and run relay-setup.sh.",
+      "cannot_connect": "Could not reach the relay. Check the host, the SSH port and the network.",
+      "forward_refused": "The relay refused the port forward: the port is not the one of this tenant, or another tenant uses it.",
+      "host_key_mismatch": "The relay presented a host key other than the expected one."
+    },
+    "abort": {
+      "already_configured": "This tenant of this relay is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SSH Relay",
+        "menu_options": {
+          "settings": "Ports, local host and keepalive",
+          "regenerate_key": "Generate a new client key",
+          "forget_host_key": "Forget the relay host key"
+        }
+      },
+      "settings": {
+        "title": "Tunnel settings",
+        "data": {
+          "ssh_port": "SSH port",
+          "remote_port": "Port on the relay",
+          "local_host": "Local host",
+          "local_port": "Local port",
+          "keepalive": "Keepalive interval (seconds)"
+        },
+        "data_description": {
+          "remote_port": "Must match the port of this tenant on the relay (18000-18999).",
+          "keepalive": "Between 5 and 300 seconds."
+        }
+      },
+      "regenerate_key": {
+        "title": "New client key",
+        "description": "Replace the public key of this tenant on the relay, then run `relay-setup.sh`. Until then the relay rejects the tunnel. The relay host key stays pinned.\n\n```\n{tenant_snippet}\n```\n\nPublic key:\n\n```\n{public_key}\n```\n\nSubmit to save the new key."
+      },
+      "forget_host_key": {
+        "title": "Forget the relay host key",
+        "description": "The next connection accepts the host key the relay presents and pins it. Only do this if you know why the relay host key changed (relay reinstalled)."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "connecting": "Connecting",
+          "connected": "Connected",
+          "reconnecting": "Reconnecting",
+          "disconnected": "Disconnected",
+          "error": "Error",
+          "waiting_for_relay": "Waiting for the relay",
+          "host_key_mismatch": "Host key changed"
+        }
+      },
+      "uptime": {
+        "name": "Uptime"
+      },
+      "reconnect_count": {
+        "name": "Reconnect count"
+      }
+    },
+    "switch": {
+      "enabled": {
+        "name": "Enabled"
+      }
+    }
+  },
+  "issues": {
+    "host_key_changed": {
+      "title": "The SSH relay host key changed",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Accept the new relay host key?",
+            "description": "The relay {host} presented the host key {actual}, but {expected} is pinned. The tunnel stays closed.\n\nIf you reinstalled the relay, accept: the next connection pins the new key. Otherwise, someone may be impersonating the relay: do not accept."
+          }
+        }
+      }
+    }
+  }
+}

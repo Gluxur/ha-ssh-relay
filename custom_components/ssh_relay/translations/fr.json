@@ -1,0 +1,124 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Se connecter à un relais SSH",
+        "description": "Home Assistant ouvre un tunnel SSH inverse vers la VM relais avec l'utilisateur `relay-<tenant>`, authentifié par une clé générée à l'étape suivante. Aucun mot de passe n'est utilisé.",
+        "data": {
+          "relay_host": "Hôte du relais",
+          "ssh_port": "Port SSH",
+          "tenant": "Nom du tenant",
+          "remote_port": "Port sur le relais",
+          "local_host": "Hôte local",
+          "local_port": "Port local",
+          "keepalive": "Intervalle keepalive (secondes)"
+        },
+        "data_description": {
+          "relay_host": "Adresse IP ou nom d'hôte de la VM relais.",
+          "tenant": "Minuscules, chiffres et tirets, 24 caractères au plus. Le même nom que dans le fichier des tenants du relais.",
+          "remote_port": "Port réservé à ce tenant sur le relais (18000-18999).",
+          "local_host": "Destination du trafic du relais. Généralement `homeassistant` sur Home Assistant OS.",
+          "local_port": "Généralement 8123.",
+          "keepalive": "Entre 5 et 300 secondes."
+        }
+      },
+      "key": {
+        "title": "Ajouter la clé au relais",
+        "description": "Ajoutez ce tenant au fichier des tenants du relais, puis lancez `relay-setup.sh` sur le relais. Remplacez le domaine par le nom par lequel vous accédez à Home Assistant.\n\n```\n{tenant_snippet}\n```\n\nClé publique :\n\n```\n{public_key}\n```\n\nValidez pour tester la connexion. La clé hôte du relais vue à ce moment est alors épinglée."
+      },
+      "key_failed": {
+        "title": "Échec du test de connexion",
+        "description": "{reason}\n\nEntrée du tenant pour le relais :\n\n```\n{tenant_snippet}\n```\n\nClé publique : `{public_key}`\n\nTestez à nouveau, ou enregistrez quand même : le tunnel attend alors que le relais connaisse la clé et épingle la clé hôte à la première connexion.",
+        "menu_options": {
+          "key": "Tester à nouveau",
+          "save": "Enregistrer quand même"
+        }
+      }
+    },
+    "error": {
+      "invalid_host": "Indiquez l'hôte du relais.",
+      "invalid_tenant": "Minuscules, chiffres et tirets uniquement, de 1 à 24 caractères.",
+      "invalid_auth": "Le relais a refusé la clé : elle n'y est pas encore. Ajoutez le tenant et lancez relay-setup.sh.",
+      "cannot_connect": "Impossible de joindre le relais. Vérifiez l'hôte, le port SSH et le réseau.",
+      "forward_refused": "Le relais a refusé la redirection de port : ce n'est pas le port de ce tenant, ou un autre tenant l'utilise.",
+      "host_key_mismatch": "Le relais a présenté une clé hôte différente de celle attendue."
+    },
+    "abort": {
+      "already_configured": "Ce tenant de ce relais est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SSH Relay",
+        "menu_options": {
+          "settings": "Ports, hôte local et keepalive",
+          "regenerate_key": "Générer une nouvelle clé cliente",
+          "forget_host_key": "Oublier la clé hôte du relais"
+        }
+      },
+      "settings": {
+        "title": "Réglages du tunnel",
+        "data": {
+          "ssh_port": "Port SSH",
+          "remote_port": "Port sur le relais",
+          "local_host": "Hôte local",
+          "local_port": "Port local",
+          "keepalive": "Intervalle keepalive (secondes)"
+        },
+        "data_description": {
+          "remote_port": "Doit correspondre au port de ce tenant sur le relais (18000-18999).",
+          "keepalive": "Entre 5 et 300 secondes."
+        }
+      },
+      "regenerate_key": {
+        "title": "Nouvelle clé cliente",
+        "description": "Remplacez la clé publique de ce tenant sur le relais, puis lancez `relay-setup.sh`. D'ici là, le relais refuse le tunnel. La clé hôte du relais reste épinglée.\n\n```\n{tenant_snippet}\n```\n\nClé publique :\n\n```\n{public_key}\n```\n\nValidez pour enregistrer la nouvelle clé."
+      },
+      "forget_host_key": {
+        "title": "Oublier la clé hôte du relais",
+        "description": "La prochaine connexion accepte la clé hôte présentée par le relais et l'épingle. Ne le faites que si vous savez pourquoi la clé hôte du relais a changé (relais réinstallé)."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Statut",
+        "state": {
+          "connecting": "Connexion",
+          "connected": "Connecté",
+          "reconnecting": "Reconnexion",
+          "disconnected": "Déconnecté",
+          "error": "Erreur",
+          "waiting_for_relay": "En attente du relais",
+          "host_key_mismatch": "Clé hôte changée"
+        }
+      },
+      "uptime": {
+        "name": "Durée de connexion"
+      },
+      "reconnect_count": {
+        "name": "Nombre de reconnexions"
+      }
+    },
+    "switch": {
+      "enabled": {
+        "name": "Activé"
+      }
+    }
+  },
+  "issues": {
+    "host_key_changed": {
+      "title": "La clé hôte du relais SSH a changé",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Accepter la nouvelle clé hôte du relais ?",
+            "description": "Le relais {host} a présenté la clé hôte {actual}, alors que {expected} est épinglée. Le tunnel reste fermé.\n\nSi vous avez réinstallé le relais, acceptez : la prochaine connexion épinglera la nouvelle clé. Sinon, quelqu'un se fait peut-être passer pour le relais : n'acceptez pas."
+          }
+        }
+      }
+    }
+  }
+}
