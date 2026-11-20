@@ -25,6 +25,8 @@ phone/app ──TLS (SNI)──▶ relay :443 and :8123     nginx stream + ssl_p
 - nginx reads the server name from the TLS handshake and forwards the encrypted stream to the tenant's port. TLS ends in Home Assistant, with its own certificate: the relay never sees your traffic in clear.
 - The integration generates the SSH key itself (ed25519, no password anywhere), pins the relay host key on the first connection, and reconnects with backoff.
 
+> If you want remote access without running a server, [Home Assistant Cloud (Nabu Casa)](https://www.nabucasa.com/) is the simplest option, and it funds the development of Home Assistant.
+
 ## Requirements
 
 - Home Assistant 2025.1 or newer (any installation type).
