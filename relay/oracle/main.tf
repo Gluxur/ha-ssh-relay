@@ -192,6 +192,8 @@ resource "terraform_data" "relay_config" {
     var.remove_legacy,
   ]
 
+  # Terraform's SSH connection does not pin the VM host key. Acceptable with
+  # key authentication: a man in the middle gets no reusable credential.
   connection {
     type        = "ssh"
     host        = oci_core_public_ip.relay.ip_address
@@ -212,7 +214,7 @@ resource "terraform_data" "relay_config" {
   provisioner "remote-exec" {
     inline = [
       # First boot: let cloud-init finish its apt-get (dpkg lock) first.
-      "sudo cloud-init status --wait > /dev/null || true",
+      "sudo timeout 900 cloud-init status --wait > /dev/null || true",
       "sudo bash /tmp/relay-setup.sh ${var.remove_legacy ? "--remove-legacy " : ""}/tmp/tenants.json",
     ]
   }

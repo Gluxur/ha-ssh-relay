@@ -134,7 +134,11 @@ sudo userdel -r ha-tunnel
 
 Then set `remove_legacy = false` and `terraform apply` (the change of
 `remove_legacy` reruns the script): without the user, the locked
-`Match User ha-tunnel` section is dropped. Finally, remove `ssh_tunnel` from
+`Match User ha-tunnel` section is dropped. Keep `remove_legacy = true` until
+this point: flipping it earlier, while `ha-tunnel` still exists, only reruns the
+script in keep mode, which carries the locked section over as it is (still
+locked), so it gains nothing; after `userdel`, the flip is what triggers the
+run that removes the section. Finally, remove `ssh_tunnel` from
 Home Assistant.
 
 ## Going back (before step 5)

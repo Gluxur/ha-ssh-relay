@@ -4,7 +4,7 @@
 Infrastructure (OCI) with a reserved public IP, opens ports 22, 443 and 8123,
 adds a budget alert on any charge, and runs
 [`relay-setup.sh`](../relay/relay-setup.sh) on the VM over SSH every time the
-tenants list or the script changes.
+tenants list, the script or `remove_legacy` changes.
 
 ## Prerequisites
 
@@ -105,8 +105,8 @@ app keeps writing your home IP back.
 
 ## Add, change or remove a tenant
 
-Edit `tenants` and run `terraform apply`. The change of the list (or of
-`relay-setup.sh`) replaces `terraform_data.relay_config`, which runs the script
+Edit `tenants` and run `terraform apply`. A change of the list, of
+`relay-setup.sh` or of `remove_legacy` replaces `terraform_data.relay_config`, which runs the script
 again. Removing a tenant cuts its sessions and deletes its user. The VM, its IP
 and its host key are never recreated by these changes: `metadata` (including
 `user_data`) and `source_details` are ignored after creation.

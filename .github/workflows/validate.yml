@@ -13,8 +13,10 @@ permissions:
 jobs:
   hacs:
     name: HACS validation
-    # HACS cannot read a private repository: skipped until the repo is public.
-    if: ${{ !github.event.repository.private }}
+    # HACS cannot read a private repository. The event payload says whether the
+    # repo is private, except on schedule (no repository in the payload): there
+    # the repository variable REPO_PUBLIC=true opts in once the repo is public.
+    if: ${{ (github.event.repository && !github.event.repository.private) || vars.REPO_PUBLIC == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa # main

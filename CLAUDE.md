@@ -20,7 +20,7 @@ shellcheck relay/relay-setup.sh
 terraform -chdir=relay/oracle fmt -check && terraform -chdir=relay/oracle init -backend=false && terraform -chdir=relay/oracle validate
 ```
 
-CI (`.github/workflows/validate.yml`) runs HACS validation, hassfest, pytest, shellcheck and terraform fmt/validate. The HACS job is gated with `if: ${{ !github.event.repository.private }}`: HACS cannot read a private repository, so it is skipped while the repo is private and runs once it is public.
+CI (`.github/workflows/validate.yml`) runs HACS validation, hassfest, pytest, shellcheck and terraform fmt/validate. The HACS job is gated with `if: ${{ (github.event.repository && !github.event.repository.private) || vars.REPO_PUBLIC == 'true' }}`: HACS cannot read a private repository, so it is skipped while the repo is private. Push/PR/dispatch payloads carry `repository.private`; the `schedule` payload has no `repository`, so the weekly run only validates HACS once the repository variable `REPO_PUBLIC` is set to `true` (set it when making the repo public: `gh variable set REPO_PUBLIC --body true`).
 
 ## Rules
 
