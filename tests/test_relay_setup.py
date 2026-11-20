@@ -265,3 +265,116 @@ def test_write_sshd_match_is_stable(tmp_path):
     assert b"Match User relay-alice" in first
     assert b"ha-tunnel" not in first
     assert b"Include /etc/ssh/sshd_config.d/*.conf" in first
+
+
+# Body of the legacy "Match User ha-tunnel" section, as found in each fixture.
+LEGACY_BODIES = {
+    "sshd_config_legacy_unmarked": [
+        "    PasswordAuthentication yes",
+        "    AllowTcpForwarding remote",
+        "    PermitListen 8123",
+        "    ForceCommand /usr/sbin/nologin",
+        "    GatewayPorts yes",  # was a global line in this form
+    ],
+    "sshd_config_legacy_marked": [
+        "    AuthenticationMethods publickey",
+        "    GatewayPorts yes",
+        "    AllowTcpForwarding remote",
+        "    PermitListen 8123",
+        "    PermitOpen none",
+        "    AllowStreamLocalForwarding no",
+        "    X11Forwarding no",
+        "    AllowAgentForwarding no",
+        "    PermitTTY no",
+        "    ForceCommand /usr/sbin/nologin",
+    ],
+}
+
+LOCKED_BODY = [
+    "    AllowTcpForwarding no",
+    "    PasswordAuthentication no",
+    "    PermitTTY no",
+    "    ForceCommand /usr/sbin/nologin",
+]
+
+
+def _legacy_section(text: str) -> list[str]:
+    """Lines after "Match User ha-tunnel", up to the end marker."""
+    lines = text.splitlines()
+    start = lines.index("Match User ha-tunnel") + 1
+    return lines[start : lines.index("# END ha-relay", start)]
+
+
+def _write_runs(tmp_path: Path, fixture: str, *modes: str) -> list[str]:
+    """Copy a fixture, run write_sshd_match once per mode, return each result."""
+    target = tmp_path / "sshd_config"
+    shutil.copyfile(FIXTURES / fixture, target)
+    code = (
+        f'{PRELUDE}source {SCRIPT}; f=$1 t=$2; shift 2; i=0; '
+        'for mode in "$@"; do i=$((i+1)); write_sshd_match "$f" "$t" "$mode"; cp "$f" "$f.$i"; done'
+    )
+    tenants = _tenants_file(tmp_path, {"alice": T})
+    result = _run(code, target.as_posix(), tenants, *modes)
+    assert result.returncode == 0, result
+    return [
+        (tmp_path / f"sshd_config.{i}").read_bytes().decode() for i in range(1, len(modes) + 1)
+    ]
+
+
+@pytest.mark.parametrize("fixture", sorted(LEGACY_BODIES))
+def test_extract_legacy_body(tmp_path, fixture):
+    result = _bash((FIXTURES / fixture).as_posix(), func="extract_legacy_sshd")
+    assert result.returncode == 0, result
+    assert result.stdout.splitlines() == LEGACY_BODIES[fixture]
+
+
+def test_extract_legacy_none_without_legacy(tmp_path):
+    target = tmp_path / "sshd_config"
+    shutil.copyfile(FIXTURES / "sshd_config_legacy_marked", target)
+    assert _bash(target.as_posix(), func="strip_legacy_sshd").returncode == 0
+    result = _bash(target.as_posix(), func="extract_legacy_sshd")
+    assert result.returncode == 0, result
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("fixture", sorted(LEGACY_BODIES))
+def test_keep_preserves_legacy_body(tmp_path, fixture):
+    first, second = _write_runs(tmp_path, fixture, "keep", "keep")
+    assert first == second  # second run parses the section back from the block
+    assert _legacy_section(first) == LEGACY_BODIES[fixture]
+    lines = first.splitlines()
+    assert "GatewayPorts yes" not in lines  # no global line left
+    assert lines.count("# BEGIN ha-relay") == 1
+    assert lines.index("Match User relay-alice") < lines.index("Match User ha-tunnel")
+    for line in UBUNTU_LINES:
+        assert line in lines
+
+
+@pytest.mark.parametrize("fixture", sorted(LEGACY_BODIES))
+def test_lock_replaces_legacy_body(tmp_path, fixture):
+    locked, kept, relocked = _write_runs(tmp_path, fixture, "lock", "keep", "lock")
+    assert _legacy_section(locked) == LOCKED_BODY
+    assert "PermitListen 8123" not in locked
+    assert "GatewayPorts yes" not in locked
+    assert kept == locked  # a later run without --remove-legacy keeps it locked
+    assert relocked == locked
+
+
+def test_render_sshd_match_legacy_body(tmp_path):
+    result = _bash(
+        _tenants_file(tmp_path, {"alice": T}), "    PermitListen 8123", func="render_sshd_match"
+    )
+    assert result.returncode == 0, result
+    lines = result.stdout.splitlines()
+    assert lines[-3:] == ["Match User ha-tunnel", "    PermitListen 8123", "# END ha-relay"]
+
+
+def test_require_tenants(tmp_path):
+    empty = _tenants_file(tmp_path, {})
+    assert _bash(empty, func="validate_tenants").returncode == 0
+    result = _bash(empty, func="require_tenants")
+    assert result.returncode == 1
+    assert "no tenants" in result.stderr
+    assert _bash(EXAMPLE.as_posix(), func="require_tenants").returncode == 0
+    out = tmp_path / "out"
+    assert _bash("--render", out.as_posix(), empty).returncode == 0

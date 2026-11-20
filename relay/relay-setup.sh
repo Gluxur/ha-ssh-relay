@@ -105,6 +105,18 @@ validate_tenants() {
   fi
 }
 
+# require_tenants <file>: apply refuses an empty list (validate and --render
+# accept it), since it would remove every relay user.
+require_tenants() {
+  local count
+  count=$(jq '.tenants | length' "$1") || return 1
+  if [[ "$count" == 0 ]]; then
+    printf 'tenants file: no tenants in %s; refusing to apply (every relay user would be removed)
+' "$1" >&2
+    return 1
+  fi
+}
+
 # ── Rendering (stdout, no side effects) ───────────────────────────────────────
 
 # Drop-in included at the top of sshd_config: first value wins in sshd, so this
@@ -119,8 +131,10 @@ EOF
 # Block appended at the end of sshd_config, between the markers. Not in
 # sshd_config.d: the Include sits at the top of sshd_config, and an included
 # Match would capture the rest of the main config.
+# render_sshd_match <file> [<legacy body>]: with a body, a last section
+# "Match User ha-tunnel" + that body (verbatim) is added for the legacy user.
 render_sshd_match() {
-  local file=$1 rows name port
+  local file=$1 legacy_body=${2:-} rows name port
   rows=$(tenant_ports "$file") || return 1
   printf '%s\n' "$BEGIN_MARK"
   cat <<'EOF'
@@ -141,6 +155,10 @@ EOF
     [[ -n "$name" ]] || continue
     printf '\nMatch User relay-%s\n    PermitListen 127.0.0.1:%s\n' "$name" "$port"
   done <<<"$rows"
+  if [[ -n "$legacy_body" ]]; then
+    printf '\n# Legacy user: kept as found until relay-setup.sh --remove-legacy (then locked).\n'
+    printf 'Match User %s\n%s\n' "$LEGACY_USER" "$legacy_body"
+  fi
   printf '%s\n' "$END_MARK"
 }
 
@@ -190,6 +208,13 @@ render_to_dir() {
 
 # ── sshd_config editing ───────────────────────────────────────────────────────
 
+# Legacy section written with --remove-legacy: ha-tunnel keeps its user and
+# authorized_keys (rollback stays possible) but can no longer forward anything.
+LEGACY_LOCKED_BODY='    AllowTcpForwarding no
+    PasswordAuthentication no
+    PermitTTY no
+    ForceCommand /usr/sbin/nologin'
+
 # strip_legacy_sshd <file>: removes, in place, the marked block and everything
 # from the first "GatewayPorts yes" line to the end of the file (the
 # password-era block, same rule as migrate-to-key-auth.sh). Trailing blank
@@ -212,23 +237,64 @@ strip_legacy_sshd() {
   rm -f "$tmp"
 }
 
-# write_sshd_match <sshd_config> <tenants.json>: strip, then append the block.
+# extract_legacy_sshd <file>: prints, verbatim, the body of the
+# "Match User ha-tunnel" section that strip_legacy_sshd would remove: from the
+# marked block first (legacy cloud-init/migrate block, or the section this
+# script keeps there), else from the unmarked "GatewayPorts yes" tail, where
+# the global "GatewayPorts yes" is carried into the body if it lacks one.
+# Prints nothing when there is no such section.
+extract_legacy_sshd() {
+  awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v user="$LEGACY_USER" '
+    function is_match(line) { return tolower(line) ~ /^[[:space:]]*match[[:space:]]/ }
+    function is_legacy(line,  n, f) {
+      n = split(line, f, " ")
+      return n == 3 && tolower(f[1]) == "match" && tolower(f[2]) == "user" && f[3] == user
+    }
+    $0 == begin { zone = "marked"; cap = ""; next }
+    $0 == end { zone = (tail ? "unmarked" : ""); cap = ""; next }
+    zone == "" && $0 == "GatewayPorts yes" { tail = 1; zone = "unmarked"; next }
+    zone != "" && is_match($0) { cap = is_legacy($0) ? zone : ""; next }
+    cap != "" { body[cap] = body[cap] $0 "\n" }
+    END {
+      if ("marked" in body) out = body["marked"]
+      else if ("unmarked" in body) {
+        out = body["unmarked"]
+        if (tolower(out) !~ /(^|\n)[[:space:]]*gatewayports[[:space:]]/)
+          out = out "    GatewayPorts yes\n"
+      }
+      sub(/[[:space:]]+$/, "", out)
+      if (out != "") print out
+    }
+  ' "$1"
+}
+
+# write_sshd_match <sshd_config> <tenants.json> [none|keep|lock]: strip, then
+# append the managed block. keep: the legacy ha-tunnel section is carried over
+# verbatim; lock: it is replaced by LEGACY_LOCKED_BODY; none (default): dropped.
 write_sshd_match() {
-  local block
-  block=$(render_sshd_match "$2") || return 1
-  strip_legacy_sshd "$1" || return 1
-  printf '\n%s\n' "$block" >>"$1"
+  local config=$1 file=$2 mode=${3:-none} body="" block
+  case "$mode" in
+    none) ;;
+    keep) body=$(extract_legacy_sshd "$config") || return 1 ;;
+    lock) body=$LEGACY_LOCKED_BODY ;;
+    *)
+      printf 'write_sshd_match: unknown legacy mode %s\n' "$mode" >&2
+      return 1
+      ;;
+  esac
+  block=$(render_sshd_match "$file" "$body") || return 1
+  strip_legacy_sshd "$config" || return 1
+  printf '\n%s\n' "$block" >>"$config"
 }
 
 # ── Apply steps (root) ────────────────────────────────────────────────────────
 
 install_packages() {
-  local pkg missing=()
+  local pkg status missing=()
   for pkg in nginx libnginx-mod-stream iptables-persistent jq; do
     # shellcheck disable=SC2016  # dpkg-query format, not a shell expansion
-    if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed'; then
-      missing+=("$pkg")
-    fi
+    status=$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null) || status=""
+    [[ "$status" == "install ok installed" ]] || missing+=("$pkg")
   done
   if ((${#missing[@]})); then
     log "installing ${missing[*]}"
@@ -238,73 +304,121 @@ install_packages() {
   fi
 }
 
-# PIDs listening on a TCP port.
+# PIDs listening on a TCP port (ss output captured first: no SIGPIPE).
 port_pids() {
-  ss -H -ltnp "sport = :$1" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u || true
+  local out
+  out=$(ss -H -ltnp "sport = :$1") || return 0
+  grep -o 'pid=[0-9]*' <<<"$out" | cut -d= -f2 | sort -u || true
+}
+
+pid_uid() { ps -o uid= -p "$1" | tr -d ' '; }
+pid_comm() { ps -o comm= -p "$1"; }
+
+# "name(user) " for one PID.
+pid_desc() {
+  local uid
+  uid=$(pid_uid "$1") || return 0
+  printf '%s(%s) ' "$(pid_comm "$1")" "$(getent passwd "$uid" | cut -d: -f1)"
 }
 
 # "name(user) ..." of the processes listening on a TCP port, or "nothing".
 port_holders() {
-  local pid uid out=""
+  local pid out=""
   for pid in $(port_pids "$1"); do
-    uid=$(ps -o uid= -p "$pid" | tr -d ' ') || continue
-    out+="$(ps -o comm= -p "$pid")($(getent passwd "$uid" | cut -d: -f1)) "
+    out+=$(pid_desc "$pid")
   done
   printf '%s\n' "${out:-nothing}"
+}
+
+# port_foreign_holders <port> [<ignored uid>]: non-nginx listeners, or nothing.
+port_foreign_holders() {
+  local pid out=""
+  for pid in $(port_pids "$1"); do
+    [[ "$(pid_comm "$pid")" != nginx ]] || continue
+    [[ -z "${2:-}" || "$(pid_uid "$pid")" != "$2" ]] || continue
+    out+=$(pid_desc "$pid")
+  done
+  printf '%s' "$out"
+}
+
+port_has_nginx() {
+  local pid
+  for pid in $(port_pids "$1"); do
+    [[ "$(pid_comm "$pid")" != nginx ]] || return 0
+  done
+  return 1
 }
 
 # port_held_by_uid <port> <uid> (uid, since ps truncates long user names).
 port_held_by_uid() {
   local pid
   for pid in $(port_pids "$1"); do
-    if [[ "$(ps -o uid= -p "$pid" | tr -d ' ')" == "$2" ]]; then
-      return 0
-    fi
+    [[ "$(pid_uid "$pid")" != "$2" ]] || return 0
   done
   return 1
 }
 
-# Sets NO_8123=1 when the legacy ha-tunnel session keeps 8123 (no --remove-legacy).
-handle_legacy() {
-  local remove_legacy=$1 legacy_uid i
-  NO_8123=0
-  legacy_uid=$(id -u "$LEGACY_USER" 2>/dev/null) || return 0
+# detect_legacy sets LEGACY_MODE (none|keep|lock), LEGACY_UID and NO_8123.
+LEGACY_MODE=none
+LEGACY_UID=""
+NO_8123=0
+
+detect_legacy() {
+  local remove_legacy=$1
+  if ! LEGACY_UID=$(id -u "$LEGACY_USER" 2>/dev/null); then
+    LEGACY_UID=""
+    if ((remove_legacy)); then
+      log "no $LEGACY_USER user: --remove-legacy has nothing to do"
+    fi
+    return 0
+  fi
   if ((remove_legacy)); then
-    # Only the session is cut: the user and its authorized_keys stay (rollback).
-    log "stopping $LEGACY_USER sessions (--remove-legacy)"
-    pkill -u "$LEGACY_USER" || true
-    for ((i = 0; i < 10; i++)); do
-      port_held_by_uid 8123 "$legacy_uid" || return 0
-      sleep 1
-    done
-    die "port 8123 still held by $LEGACY_USER after 10 s"
-  elif port_held_by_uid 8123 "$legacy_uid"; then
-    warn "8123 held by $LEGACY_USER (legacy); run with --remove-legacy to take it over"
-    NO_8123=1
+    LEGACY_MODE=lock
+  else
+    LEGACY_MODE=keep
+    if port_held_by_uid 8123 "$LEGACY_UID"; then
+      warn "8123 held by $LEGACY_USER (legacy); run with --remove-legacy to take it over"
+      NO_8123=1
+    fi
   fi
 }
 
-# Fails before any write if 443/8123 are taken by something other than nginx.
+# Fails before any write if 443/8123 are taken by something other than nginx
+# (or than ha-tunnel on 8123, when --remove-legacy will take it over).
 check_ports_free() {
-  local port ports=(443)
-  ((NO_8123)) || ports+=(8123)
-  for port in "${ports[@]}"; do
-    if [[ -n "$(port_pids "$port")" ]] \
-      && ! ss -H -ltnp "sport = :$port" | grep -q '"nginx"'; then
-      die "port $port held by $(port_holders "$port")"
-    fi
-  done
+  local holders ignore=""
+  [[ "$LEGACY_MODE" != lock ]] || ignore=$LEGACY_UID
+  holders=$(port_foreign_holders 443)
+  [[ -z "$holders" ]] || die "port 443 held by $holders"
+  if ! ((NO_8123)); then
+    holders=$(port_foreign_holders 8123 "$ignore")
+    [[ -z "$holders" ]] || die "port 8123 held by $holders"
+  fi
 }
+
+# ── Backups and rollback ──────────────────────────────────────────────────────
 
 BACKUPS=()
 CREATED=()
+ROLLBACK_ARMED=0
+SSHD_RELOADED=0
+NGINX_RELOADED=0
+STAGE=""
+NGINX_DEFAULT_SITE=/etc/nginx/sites-enabled/default
+DEFAULT_SITE_LINK=""
 
+# Backups sit next to each file and match no include glob (*.conf). The
+# sites-enabled link is never copied there (nginx includes sites-enabled/*):
+# its target is recorded instead.
 backup_configs() {
   local ts f
   ts=$(date +%Y%m%d%H%M%S)
+  if [[ -L "$NGINX_DEFAULT_SITE" ]]; then
+    DEFAULT_SITE_LINK=$(readlink "$NGINX_DEFAULT_SITE")
+  fi
   for f in "$SSHD_CONFIG" "$SSHD_GLOBAL" "$NGINX_CONF" "$NGINX_RELAY_CONF"; do
     if [[ -e "$f" ]]; then
-      cp -p "$f" "$f.bak.$ts"
+      cp -a "$f" "$f.bak.$ts"
       BACKUPS+=("$f.bak.$ts")
     else
       CREATED+=("$f")
@@ -316,12 +430,39 @@ backup_configs() {
 restore_configs() {
   local b f
   for b in "${BACKUPS[@]}"; do
-    cp -p "$b" "${b%.bak.*}"
+    f=${b%.bak.*}
+    rm -f "$f"
+    cp -a "$b" "$f" || warn "could not restore $f from $b"
   done
   for f in "${CREATED[@]}"; do
     rm -f "$f"
   done
+  if [[ -n "$DEFAULT_SITE_LINK" ]]; then
+    ln -sfn "$DEFAULT_SITE_LINK" "$NGINX_DEFAULT_SITE" || warn "could not restore $NGINX_DEFAULT_SITE"
+  fi
 }
+
+# EXIT trap of the apply path. While armed (from the first write until the
+# listeners are checked), any exit restores the backups and the services.
+on_exit() {
+  local rc=$?
+  if ((ROLLBACK_ARMED)); then
+    ROLLBACK_ARMED=0
+    warn "apply failed; restoring the previous configuration"
+    restore_configs
+    if ((SSHD_RELOADED)); then
+      systemctl reload ssh || warn "reload ssh failed after restore"
+    fi
+    if ((NGINX_RELOADED)); then
+      systemctl restart nginx || warn "restart nginx failed after restore"
+    fi
+    ((rc)) || rc=1
+  fi
+  [[ -z "$STAGE" ]] || rm -rf "$STAGE"
+  exit "$rc"
+}
+
+# ── Users, sshd, nginx, firewall ──────────────────────────────────────────────
 
 ensure_user() {
   local name=$1 stage=$2 user="relay-$1" home
@@ -361,8 +502,8 @@ sync_users() {
   # ha-tunnel is not in the group, so it is never removed here.
   IFS=, read -ra members <<<"$(getent group "$RELAY_GROUP" | cut -d: -f4)"
   for user in "${members[@]}"; do
-    if [[ "$user" != relay-* ]]; then
-      warn "$user is in group $RELAY_GROUP but is not a relay-* user; left alone"
+    if [[ "$user" != relay-?* ]]; then
+      warn "$user is in group $RELAY_GROUP but is not a relay-<name> user; left alone"
     elif [[ -z "${wanted[${user#relay-}]:-}" ]]; then
       remove_user "$user"
     fi
@@ -376,7 +517,7 @@ configure_sshd() {
   if ! grep -qx 'Include /etc/ssh/sshd_config.d/\*.conf' "$SSHD_CONFIG"; then
     warn "$SSHD_CONFIG does not include sshd_config.d/*.conf; $SSHD_GLOBAL is ignored"
   fi
-  write_sshd_match "$SSHD_CONFIG" "$file"
+  write_sshd_match "$SSHD_CONFIG" "$file" "$LEGACY_MODE"
 }
 
 NGINX_RESTART=0
@@ -394,7 +535,7 @@ configure_nginx() {
     NGINX_RESTART=1
   fi
   # Nothing must listen on 80.
-  rm -f /etc/nginx/sites-enabled/default
+  rm -f "$NGINX_DEFAULT_SITE"
 }
 
 configure_firewall() {
@@ -405,6 +546,8 @@ configure_firewall() {
   done
   netfilter-persistent save
 }
+
+# ── Checks and reloads ────────────────────────────────────────────────────────
 
 # Admin user intact, each tenant limited to its own port.
 verify_sshd() {
@@ -428,26 +571,38 @@ verify_sshd() {
   done <<<"$(tenant_ports "$file")"
 }
 
+# Failures exit through die: the EXIT trap restores the backups.
 check_configs() {
   local file=$1
   install -d -m 755 /run/sshd
-  if ! sshd -t; then
-    restore_configs
-    die "sshd -t failed; previous configuration restored"
-  fi
-  if ! nginx -t; then
-    restore_configs
-    die "nginx -t failed; previous configuration restored"
-  fi
-  if ! verify_sshd "$file"; then
-    restore_configs
-    die "sshd verification failed; previous configuration restored"
-  fi
+  sshd -t || die "sshd -t failed"
+  nginx -t || die "nginx -t failed"
+  verify_sshd "$file" || die "sshd verification failed"
 }
 
-reload_services() {
+reload_ssh() {
   # reload: running sessions (yours included) stay up.
+  SSHD_RELOADED=1
   systemctl reload ssh
+}
+
+# --remove-legacy, after reload_ssh: ha-tunnel can no longer forward, so once
+# its session is cut it cannot take 8123 back. User and keys are kept.
+take_over_8123() {
+  local i holders
+  [[ "$LEGACY_MODE" == lock ]] || return 0
+  log "stopping $LEGACY_USER sessions (--remove-legacy)"
+  pkill -u "$LEGACY_USER" || true
+  for ((i = 0; i < 10; i++)); do
+    port_held_by_uid 8123 "$LEGACY_UID" || break
+    sleep 1
+  done
+  holders=$(port_foreign_holders 8123)
+  [[ -z "$holders" ]] || die "port 8123 still held by $holders after stopping $LEGACY_USER"
+}
+
+reload_nginx() {
+  NGINX_RELOADED=1
   if ((NGINX_RESTART)) || ! systemctl is-active --quiet nginx; then
     systemctl restart nginx
   else
@@ -461,7 +616,7 @@ check_listeners() {
   ((NO_8123)) || ports+=(8123)
   for port in "${ports[@]}"; do
     for ((i = 0; ; i++)); do
-      if ss -H -ltnp "sport = :$port" | grep -q '"nginx"'; then
+      if port_has_nginx "$port"; then
         break
       fi
       ((i < 5)) || die "nginx is not listening on $port (held by $(port_holders "$port"))"
@@ -481,7 +636,7 @@ show_fingerprint() {
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
-  local remove_legacy=0 render_dir="" file="" stage
+  local remove_legacy=0 render_dir="" file=""
   while (($#)); do
     case "$1" in
       --remove-legacy) remove_legacy=1 ;;
@@ -513,20 +668,24 @@ main() {
 
   install_packages                            # 1
   validate_tenants "$file" || exit 1          # 2: nothing modified on failure
-  stage=$(mktemp -d)
-  # shellcheck disable=SC2064  # expand now: stage is local
-  trap "rm -rf '$stage'" EXIT
-  render_to_dir "$stage" "$file"
-  handle_legacy "$remove_legacy"
+  require_tenants "$file" || exit 1
+  trap on_exit EXIT
+  STAGE=$(mktemp -d)
+  render_to_dir "$STAGE" "$file"
+  detect_legacy "$remove_legacy"
   check_ports_free
   backup_configs
-  sync_users "$file" "$stage"                 # 3
-  configure_sshd "$file" "$stage"             # 4
-  configure_nginx "$file" "$stage"            # 5
+  ROLLBACK_ARMED=1                            # from here, any exit rolls back
+  sync_users "$file" "$STAGE"                 # 3
+  configure_sshd "$file" "$STAGE"             # 4
+  configure_nginx "$file" "$STAGE"            # 5
   configure_firewall                          # 6
   check_configs "$file"                       # 7
-  reload_services
+  reload_ssh
+  take_over_8123
+  reload_nginx
   check_listeners                             # 8
+  ROLLBACK_ARMED=0
   show_fingerprint                            # 9
 }
 
