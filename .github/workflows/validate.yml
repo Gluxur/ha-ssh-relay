@@ -13,6 +13,8 @@ permissions:
 jobs:
   hacs:
     name: HACS validation
+    # HACS cannot read a private repository: skipped until the repo is public.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa # main
@@ -48,11 +50,9 @@ jobs:
   terraform:
     name: Terraform
     runs-on: ubuntu-latest
-    # TODO(Task 6): remove once relay/oracle exists.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
       - run: terraform fmt -check -recursive relay/oracle
       - run: terraform -chdir=relay/oracle init -backend=false
       - run: terraform -chdir=relay/oracle validate

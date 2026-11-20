@@ -1,0 +1,46 @@
+# Copy this file to terraform.tfvars and fill in the values.
+# Never commit terraform.tfvars.
+
+# OCID of the root compartment, in the Oracle Cloud console:
+# Profile menu → Tenancy → OCID
+compartment_id = "ocid1.tenancy.oc1..xxxxxxxxxxxx"
+
+# Region: the home region of your tenancy.
+region = "eu-paris-1"
+
+# Availability domain index (0 = AD-1).
+# On "Out of host capacity", try 1 or 2.
+availability_domain_index = 0
+
+# Admin SSH key of the VM (user ubuntu). Terraform uses the private key to
+# run relay-setup.sh on the VM.
+# Create it with: ssh-keygen -t ed25519 -C "ha-relay-admin" -f ~/.ssh/ha_relay_admin
+ssh_public_key             = "ssh-ed25519 AAAA... ha-relay-admin"
+admin_ssh_private_key_path = "~/.ssh/ha_relay_admin"
+
+# One entry per Home Assistant. The public key is shown by the SSH Relay
+# integration when you add it: add a tenant only once its key is known.
+tenants = {
+  alice = {
+    domain     = "alice.duckdns.org"
+    port       = 18123
+    public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlicePlaceholderReplaceWithTheIntegrationKey ha-alice"
+  }
+  bob = {
+    domain     = "bob.duckdns.org"
+    port       = 18124
+    public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobPlaceholderReplaceWithTheIntegrationKey0 ha-bob"
+  }
+}
+
+# Only for a relay migrated from the old ssh_tunnel setup (user ha-tunnel):
+# true switches port 8123 over to nginx. See docs/migration-from-ssh-tunnel.md.
+remove_legacy = false
+
+# Email for the cost alerts (actual AND forecast charges).
+alert_email = "you@example.com"
+
+# Always Free VM shape:
+#   VM.Standard.A1.Flex    → ARM Ampere, 1 OCPU / 6 GB RAM (preferred, when capacity is available)
+#   VM.Standard.E2.1.Micro → AMD x86, 1 OCPU / 1 GB RAM (usually available, enough for the relay)
+vm_shape = "VM.Standard.A1.Flex"
