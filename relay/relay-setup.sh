@@ -451,9 +451,12 @@ STAGE=""
 NGINX_DEFAULT_SITE=/etc/nginx/sites-enabled/default
 DEFAULT_SITE_LINK=""
 
-# Backups sit next to each file and match no include glob (*.conf). The
+# Backups sit next to each file as <file>.ha-relay-bak.<YYYYmmddHHMMSS>
+# (distinct from the .bak.<stamp> of migrate-to-key-auth.sh and manual copies,
+# which prune_backups never touches) and match no include glob (*.conf). The
 # sites-enabled link is never copied there (nginx includes sites-enabled/*):
 # its target is recorded instead.
+BACKUP_SUFFIX=.ha-relay-bak.
 backup_configs() {
   local ts f
   ts=$(date +%Y%m%d%H%M%S)
@@ -462,8 +465,8 @@ backup_configs() {
   fi
   for f in "$SSHD_CONFIG" "$SSHD_GLOBAL" "$NGINX_CONF" "$NGINX_RELAY_CONF"; do
     if [[ -e "$f" ]]; then
-      cp -a "$f" "$f.bak.$ts"
-      BACKUPS+=("$f.bak.$ts")
+      cp -a "$f" "$f$BACKUP_SUFFIX$ts"
+      BACKUPS+=("$f$BACKUP_SUFFIX$ts")
     else
       CREATED+=("$f")
     fi
@@ -471,13 +474,14 @@ backup_configs() {
   log "backups: ${BACKUPS[*]}"
 }
 
-# prune_backups <file>...: keeps the 5 most recent <file>.bak.* (the timestamp
-# sorts as text), after a successful run.
+# prune_backups <file>...: keeps the 5 most recent of this script's own
+# backups, <file>.ha-relay-bak.<14 digits> (the timestamp sorts as text), after
+# a successful run. Any other file next to it is left alone.
 prune_backups() {
   local f b baks i
   for f in "$@"; do
     baks=()
-    for b in "$f".bak.*; do
+    for b in "$f$BACKUP_SUFFIX"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
       if [[ -e "$b" ]]; then baks+=("$b"); fi
     done
     for ((i = 0; i < ${#baks[@]} - 5; i++)); do
@@ -491,7 +495,7 @@ prune_backups() {
 restore_configs() {
   local b f tmp
   for b in "${BACKUPS[@]}"; do
-    f=${b%.bak.*}
+    f=${b%"$BACKUP_SUFFIX"*}
     tmp="$f.restore.$$"
     if cp -a "$b" "$tmp" && mv -f "$tmp" "$f"; then
       continue

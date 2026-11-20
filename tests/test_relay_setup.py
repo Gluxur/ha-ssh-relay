@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -236,7 +237,10 @@ def test_main_requires_root_without_render():
     assert "root" in result.stderr
 
 
-@pytest.mark.parametrize("fixture", ["sshd_config_legacy_unmarked", "sshd_config_legacy_marked"])
+@pytest.mark.parametrize(
+    "fixture",
+    ["sshd_config_legacy_unmarked", "sshd_config_legacy_marked", "sshd_config_legacy_prod"],
+)
 def test_strip_legacy_both_forms(tmp_path, fixture):
     target = tmp_path / "sshd_config"
     shutil.copyfile(FIXTURES / fixture, target)
@@ -274,6 +278,17 @@ LEGACY_BODIES = {
         "    AllowTcpForwarding remote",
         "    PermitListen 8123",
         "    ForceCommand /usr/sbin/nologin",
+        "    GatewayPorts yes",  # was a global line in this form
+    ],
+    # Real production relay: password auth, a global line between
+    # "GatewayPorts yes" and the Match, no ForceCommand/PermitListen.
+    "sshd_config_legacy_prod": [
+        "    PasswordAuthentication yes",
+        "    AllowTcpForwarding yes",
+        "    X11Forwarding no",
+        "    AllowAgentForwarding no",
+        "    PermitTTY no",
+        "    PermitOpen localhost:8123",
         "    GatewayPorts yes",  # was a global line in this form
     ],
     "sshd_config_legacy_marked": [
@@ -360,6 +375,23 @@ def test_lock_replaces_legacy_body(tmp_path, fixture):
     assert relocked == locked
 
 
+def test_keep_prod_legacy_section(tmp_path):
+    """The production form keeps password auth, forwarding and GatewayPorts for
+    ha-tunnel; its stripped global "PasswordAuthentication no" is not carried."""
+    kept, = _write_runs(tmp_path, "sshd_config_legacy_prod", "keep")
+    section = _legacy_section(kept)
+    for line in (
+        "    PasswordAuthentication yes",
+        "    AllowTcpForwarding yes",
+        "    PermitOpen localhost:8123",
+        "    GatewayPorts yes",
+    ):
+        assert line in section
+    lines = kept.splitlines()
+    assert "PasswordAuthentication no" not in lines  # global line stripped (drop-ins provide it)
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in lines
+
+
 def test_render_sshd_match_legacy_body(tmp_path):
     result = _bash(
         _tenants_file(tmp_path, {"alice": T}), "    PermitListen 8123", func="render_sshd_match"
@@ -428,13 +460,13 @@ def test_check_legacy_effective(tmp_path, mode, output, ok):
 def test_restore_configs_atomic(tmp_path):
     present = tmp_path / "sshd_config"
     present.write_bytes(b"new\n")
-    (tmp_path / "sshd_config.bak.1").write_bytes(b"old\n")
+    (tmp_path / "sshd_config.ha-relay-bak.1").write_bytes(b"old\n")
     other = tmp_path / "nginx.conf"
     other.write_bytes(b"new\n")  # its backup is missing: the copy fails
     created = tmp_path / "ha-relay.conf"
     created.write_bytes(b"new\n")
     code = (
-        f'{PRELUDE}source {SCRIPT}; BACKUPS=("$1.bak.1" "$2.bak.1"); CREATED=("$3"); '
+        f'{PRELUDE}source {SCRIPT}; BACKUPS=("$1.ha-relay-bak.1" "$2.ha-relay-bak.1"); CREATED=("$3"); '
         "restore_configs"
     )
     result = _run(code, present.as_posix(), other.as_posix(), created.as_posix())
@@ -543,13 +575,45 @@ def test_prune_backups_keeps_five(tmp_path):
     conf.write_bytes(b"x\n")
     stamps = [f"2026112000000{i}" for i in range(8)]
     for stamp in stamps:
-        (tmp_path / f"sshd_config.bak.{stamp}").write_bytes(b"old\n")
+        (tmp_path / f"sshd_config.ha-relay-bak.{stamp}").write_bytes(b"old\n")
+    # Not ours: migrate-to-key-auth.sh's backup, a manual copy, malformed stamps.
+    foreign = [
+        "sshd_config.bak.20260430120000",
+        "sshd_config.bak.manual",
+        "sshd_config.ha-relay-bak.manual",
+        "sshd_config.ha-relay-bak.2026",
+    ]
+    for name in foreign:
+        (tmp_path / name).write_bytes(b"foreign\n")
     other = tmp_path / "nginx.conf"  # no backup at all: nothing to do
     result = _bash(conf.as_posix(), other.as_posix(), func="prune_backups")
     assert result.returncode == 0, result
-    left = sorted(p.name for p in tmp_path.glob("sshd_config.bak.*"))
-    assert left == [f"sshd_config.bak.{s}" for s in stamps[-5:]]
+    ours = [f"sshd_config.ha-relay-bak.{s}" for s in stamps]
+    left = sorted(p.name for p in tmp_path.iterdir() if p.name in ours)
+    assert left == ours[-5:]
+    for name in foreign:
+        assert (tmp_path / name).exists(), name
     assert conf.exists()
+
+
+def test_backup_configs_suffix(tmp_path):
+    """Backups use a suffix distinct from migrate-to-key-auth.sh's .bak.<stamp>."""
+    names = ("SSHD_CONFIG", "SSHD_GLOBAL", "NGINX_CONF", "NGINX_RELAY_CONF")
+    assign = []
+    for var in names:
+        (tmp_path / var.lower()).write_bytes(b"x\n")
+        assign.append(f'{var}="$1/{var.lower()}"')
+    code = (
+        f'{PRELUDE}source {SCRIPT}; {" ".join(assign)}; NGINX_DEFAULT_SITE="$1/none"; '
+        'backup_configs >/dev/null; printf "%s\\n" "${BACKUPS[@]}"'
+    )
+    result = _run(code, tmp_path.as_posix())
+    assert result.returncode == 0, result
+    backups = result.stdout.splitlines()
+    assert len(backups) == len(names)
+    for backup in backups:
+        assert re.fullmatch(r".*\.ha-relay-bak\.[0-9]{14}", backup), backup
+        assert Path(backup).exists()
 
 
 def test_sync_users_defers_removals(tmp_path):

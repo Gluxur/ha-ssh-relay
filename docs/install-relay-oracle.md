@@ -125,7 +125,7 @@ terraform apply -replace=terraform_data.relay_config
 - **The script fails**: it restores the previous configuration, then exits
   with an error naming the cause (invalid tenant, `sshd -t`, `nginx -t`, a port
   already held by another program). Fix and apply again. Its backups sit next to
-  each file (`/etc/ssh/sshd_config.bak.<timestamp>`, ...).
+  each file (`/etc/ssh/sshd_config.ha-relay-bak.<timestamp>`, ...).
 - **Status `waiting_for_relay` in Home Assistant**: the relay does not know the
   key yet (tenant missing or apply not run), or the key was regenerated.
 - **Charges**: the budget alerts by email on any actual or forecast charge.

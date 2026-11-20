@@ -159,9 +159,9 @@ the step 4 run (`--remove-legacy`), which hold the pre-switch configuration
 (only the 5 most recent backups of each file are kept):
 
 ```bash
-ls /etc/ssh/sshd_config.bak.* /etc/nginx/stream.d/ha-relay.conf.bak.*
-sudo cp -a /etc/ssh/sshd_config.bak.<timestamp> /etc/ssh/sshd_config
-sudo cp -a /etc/nginx/stream.d/ha-relay.conf.bak.<timestamp> /etc/nginx/stream.d/ha-relay.conf
+ls /etc/ssh/sshd_config.ha-relay-bak.* /etc/nginx/stream.d/ha-relay.conf.ha-relay-bak.*
+sudo cp -a /etc/ssh/sshd_config.ha-relay-bak.<timestamp> /etc/ssh/sshd_config
+sudo cp -a /etc/nginx/stream.d/ha-relay.conf.ha-relay-bak.<timestamp> /etc/nginx/stream.d/ha-relay.conf
 sudo sshd -t && sudo systemctl reload ssh
 sudo nginx -t && sudo systemctl reload nginx
 ```

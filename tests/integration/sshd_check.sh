@@ -74,12 +74,43 @@ refuse_case() {
   fi
 }
 
+# expect_sshd_t <label> <user> <regex>...: each regex matches a line of the
+# real "sshd -T" output for <user> on the config of case <label>.
+expect_sshd_t() {
+  local label=$1 user=$2 out re
+  shift 2
+  out=$(sshd -T -f "$WORK/$label" -C "user=$user,host=x,addr=1.2.3.4") || {
+    printf 'FAILED  %s: sshd -T %s
+' "$label" "$user"
+    FAILED=1
+    return
+  }
+  for re in "$@"; do
+    if grep -Eqx "$re" <<<"$out"; then
+      printf 'ok      %s: %s %s
+' "$label" "$user" "$re"
+    else
+      printf 'FAILED  %s: %s %s
+' "$label" "$user" "$re"
+      FAILED=1
+    fi
+  done
+}
+
 ssh -V 2>&1 || true
 run_case stock-none "$STOCK" none
-for fixture in sshd_config_legacy_marked sshd_config_legacy_unmarked; do
+for fixture in sshd_config_legacy_marked sshd_config_legacy_unmarked sshd_config_legacy_prod; do
   run_case "${fixture#sshd_config_}-keep" "$FIXTURES/$fixture" keep
   run_case "${fixture#sshd_config_}-lock" "$FIXTURES/$fixture" lock
 done
+# Production form: the live ha-tunnel tunnel (password auth, binds *:8123)
+# keeps working until --remove-legacy; the admin stays key-only although the
+# global "PasswordAuthentication no" of sshd_config was stripped (the drop-in
+# provides it).
+expect_sshd_t legacy_prod-keep "$LEGACY_USER" 'passwordauthentication yes' 'gatewayports yes'   'allowtcpforwarding yes' 'permitlisten( [^ ]+)* ([^ ]*:)?(8123|any)( .*)?'
+expect_sshd_t legacy_prod-keep "$RELAY_ADMIN_USER" 'passwordauthentication no' 'forcecommand none'
+expect_sshd_t legacy_prod-lock "$LEGACY_USER" 'allowtcpforwarding no'   'forcecommand /usr/sbin/nologin' 'passwordauthentication no'
+expect_sshd_t legacy_prod-lock "$RELAY_ADMIN_USER" 'passwordauthentication no' 'forcecommand none'
 run_case legacy_unparsable-lock "$FIXTURES/sshd_config_legacy_unparsable" lock
 refuse_case legacy_unparsable-keep "$FIXTURES/sshd_config_legacy_unparsable" keep
 for mode in none keep lock; do

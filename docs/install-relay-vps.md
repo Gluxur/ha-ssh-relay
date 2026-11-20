@@ -91,8 +91,10 @@ In order, the script:
    256 SHA256:... root@relay (ED25519)
    ```
 
-Every modified file is backed up next to itself (`<file>.bak.<timestamp>`);
-after a successful run, only the 5 most recent backups of each file are kept.
+Every modified file is backed up next to itself
+(`<file>.ha-relay-bak.<YYYYmmddHHMMSS>`); after a successful run, only the 5
+most recent of these are kept for each file. Other backups (e.g.
+`sshd_config.bak.*` made by hand or by an older script) are never removed.
 From the first write until the listeners are checked, any failure (or `^C`, or
 a dropped SSH session) restores those backups and the services. User removals
 happen only after that point, once the new configuration is loaded, and are
