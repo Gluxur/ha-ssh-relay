@@ -268,6 +268,22 @@ extract_legacy_sshd() {
   ' "$1"
 }
 
+# check_legacy_extractable <file>: fails if the text strip_legacy_sshd would
+# remove mentions ha-tunnel but extract_legacy_sshd finds no body (e.g.
+# "Match User ha-tunnel,foo", a trailing comment, extra criteria): keeping the
+# legacy user would otherwise silently drop its config.
+check_legacy_extractable() {
+  local removed body
+  removed=$(sed -n -e "/^$BEGIN_MARK\$/,/^$END_MARK\$/p" -e '/^GatewayPorts yes$/,$p' "$1") || return 1
+  [[ "$removed" == *"$LEGACY_USER"* ]] || return 0
+  body=$(extract_legacy_sshd "$1") || return 1
+  if [[ -z "$body" ]]; then
+    printf '%s: the legacy block mentions %s but no "Match User %s" section could be read; fix it by hand\n' \
+      "$1" "$LEGACY_USER" "$LEGACY_USER" >&2
+    return 1
+  fi
+}
+
 # write_sshd_match <sshd_config> <tenants.json> [none|keep|lock]: strip, then
 # append the managed block. keep: the legacy ha-tunnel section is carried over
 # verbatim; lock: it is replaced by LEGACY_LOCKED_BODY; none (default): dropped.
@@ -275,7 +291,10 @@ write_sshd_match() {
   local config=$1 file=$2 mode=${3:-none} body="" block
   case "$mode" in
     none) ;;
-    keep) body=$(extract_legacy_sshd "$config") || return 1 ;;
+    keep)
+      check_legacy_extractable "$config" || return 1
+      body=$(extract_legacy_sshd "$config") || return 1
+      ;;
     lock) body=$LEGACY_LOCKED_BODY ;;
     *)
       printf 'write_sshd_match: unknown legacy mode %s\n' "$mode" >&2
@@ -427,12 +446,18 @@ backup_configs() {
   log "backups: ${BACKUPS[*]}"
 }
 
+# Each file is copied to a temp file in its own directory, then renamed over
+# the original: a failed copy never leaves e.g. sshd_config missing.
 restore_configs() {
-  local b f
+  local b f tmp
   for b in "${BACKUPS[@]}"; do
     f=${b%.bak.*}
-    rm -f "$f"
-    cp -a "$b" "$f" || warn "could not restore $f from $b"
+    tmp="$f.restore.$$"
+    if cp -a "$b" "$tmp" && mv -f "$tmp" "$f"; then
+      continue
+    fi
+    rm -f "$tmp"
+    warn "could not restore $f from $b"
   done
   for f in "${CREATED[@]}"; do
     rm -f "$f"
@@ -571,6 +596,45 @@ verify_sshd() {
   done <<<"$(tenant_ports "$file")"
 }
 
+# check_legacy_effective <keep|lock> < "sshd -T" output for ha-tunnel: the
+# legacy section really applies (an earlier Match, above the managed block or
+# in a drop-in, would win silently). lock: no forwarding, nologin; keep:
+# PermitListen still covers 8123.
+check_legacy_effective() {
+  local out
+  out=$(cat)
+  case "$1" in
+    lock)
+      if ! grep -qx 'allowtcpforwarding no' <<<"$out" \
+        || ! grep -qx 'forcecommand /usr/sbin/nologin' <<<"$out"; then
+        printf 'sshd -T (%s): the locked section is not in effect (allowtcpforwarding no, forcecommand /usr/sbin/nologin expected)\n' \
+          "$LEGACY_USER" >&2
+        return 1
+      fi
+      ;;
+    keep)
+      if ! grep -Eq '^permitlisten( [^ ]+)* ([^ ]*:)?(8123|any)( |$)' <<<"$out"; then
+        printf 'sshd -T (%s): permitlisten no longer covers 8123\n' "$LEGACY_USER" >&2
+        return 1
+      fi
+      ;;
+    *) return 0 ;;
+  esac
+}
+
+# verify_legacy_sshd: in lock mode, and in keep mode when a legacy section was
+# written, check what sshd will really apply to ha-tunnel.
+verify_legacy_sshd() {
+  local out
+  case "$LEGACY_MODE" in
+    lock) ;;
+    keep) grep -qx "Match User $LEGACY_USER" "$SSHD_CONFIG" || return 0 ;;
+    *) return 0 ;;
+  esac
+  out=$(sshd -T -C "user=$LEGACY_USER,host=x,addr=1.2.3.4") || return 1
+  check_legacy_effective "$LEGACY_MODE" <<<"$out"
+}
+
 # Failures exit through die: the EXIT trap restores the backups.
 check_configs() {
   local file=$1
@@ -578,6 +642,7 @@ check_configs() {
   sshd -t || die "sshd -t failed"
   nginx -t || die "nginx -t failed"
   verify_sshd "$file" || die "sshd verification failed"
+  verify_legacy_sshd || die "sshd verification of $LEGACY_USER failed"
 }
 
 reload_ssh() {
@@ -670,9 +735,14 @@ main() {
   validate_tenants "$file" || exit 1          # 2: nothing modified on failure
   require_tenants "$file" || exit 1
   trap on_exit EXIT
+  # A dropped admin session (HUP) or ^C goes through on_exit too.
+  trap 'exit 130' INT TERM HUP
   STAGE=$(mktemp -d)
   render_to_dir "$STAGE" "$file"
   detect_legacy "$remove_legacy"
+  if [[ "$LEGACY_MODE" == keep ]] && ! check_legacy_extractable "$SSHD_CONFIG"; then
+    die "refusing to touch $SSHD_CONFIG: the $LEGACY_USER config would be lost"
+  fi
   check_ports_free
   backup_configs
   ROLLBACK_ARMED=1                            # from here, any exit rolls back

@@ -378,3 +378,69 @@ def test_require_tenants(tmp_path):
     assert _bash(EXAMPLE.as_posix(), func="require_tenants").returncode == 0
     out = tmp_path / "out"
     assert _bash("--render", out.as_posix(), empty).returncode == 0
+
+
+@pytest.mark.parametrize("fixture", sorted(LEGACY_BODIES))
+def test_legacy_extractable_ok(fixture):
+    result = _bash((FIXTURES / fixture).as_posix(), func="check_legacy_extractable")
+    assert result.returncode == 0, result
+
+
+def test_legacy_unparsable_refused(tmp_path):
+    target = tmp_path / "sshd_config"
+    shutil.copyfile(FIXTURES / "sshd_config_legacy_unparsable", target)
+    before = target.read_bytes()
+    result = _bash(target.as_posix(), func="check_legacy_extractable")
+    assert result.returncode == 1
+    assert "ha-tunnel" in result.stderr
+    result = _bash(
+        target.as_posix(), _tenants_file(tmp_path, {"alice": T}), "keep", func="write_sshd_match"
+    )
+    assert result.returncode == 1
+    assert target.read_bytes() == before  # nothing written
+
+
+@pytest.mark.parametrize(
+    "mode,output,ok",
+    [
+        ("lock", "allowtcpforwarding no\nforcecommand /usr/sbin/nologin\npermittty no", True),
+        ("lock", "allowtcpforwarding remote\nforcecommand /usr/sbin/nologin", False),
+        ("lock", "allowtcpforwarding no\npermittty no", False),
+        ("keep", "gatewayports yes\npermitlisten 8123", True),
+        ("keep", "permitlisten localhost:8123", True),
+        ("keep", "permitlisten 127.0.0.1:18123 8123", True),
+        ("keep", "permitlisten any", True),
+        ("keep", "permitlisten 127.0.0.1:18123", False),
+        ("keep", "permitlisten 81234", False),
+        ("keep", "permitlisten none", False),
+    ],
+)
+def test_check_legacy_effective(tmp_path, mode, output, ok):
+    path = tmp_path / "sshd-T.txt"
+    path.write_bytes(output.encode() + b"\n")
+    code = f'{PRELUDE}source {SCRIPT}; check_legacy_effective "$1" < "$2"'
+    result = _run(code, mode, path.as_posix())
+    assert result.returncode == (0 if ok else 1), result
+    if not ok:
+        assert "ha-tunnel" in result.stderr
+
+
+def test_restore_configs_atomic(tmp_path):
+    present = tmp_path / "sshd_config"
+    present.write_bytes(b"new\n")
+    (tmp_path / "sshd_config.bak.1").write_bytes(b"old\n")
+    other = tmp_path / "nginx.conf"
+    other.write_bytes(b"new\n")  # its backup is missing: the copy fails
+    created = tmp_path / "ha-relay.conf"
+    created.write_bytes(b"new\n")
+    code = (
+        f'{PRELUDE}source {SCRIPT}; BACKUPS=("$1.bak.1" "$2.bak.1"); CREATED=("$3"); '
+        "restore_configs"
+    )
+    result = _run(code, present.as_posix(), other.as_posix(), created.as_posix())
+    assert result.returncode == 0, result
+    assert present.read_bytes() == b"old\n"
+    assert other.read_bytes() == b"new\n"  # left in place, not removed
+    assert "could not restore" in result.stderr
+    assert not created.exists()
+    assert not list(tmp_path.glob("*.restore.*"))
