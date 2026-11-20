@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Se connecter à un relais SSH",
-        "description": "Home Assistant ouvre un tunnel SSH inverse vers la VM relais avec l'utilisateur `relay-<tenant>`, authentifié par une clé générée à l'étape suivante. Aucun mot de passe n'est utilisé.",
+        "description": "Home Assistant ouvre un tunnel SSH inverse vers la VM relais avec l'utilisateur `relay-` suivi du nom du tenant, authentifié par une clé générée à l'étape suivante. Aucun mot de passe n'est utilisé.",
         "data": {
           "relay_host": "Hôte du relais",
           "ssh_port": "Port SSH",

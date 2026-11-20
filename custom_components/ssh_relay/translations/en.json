@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to an SSH relay",
-        "description": "Home Assistant opens a reverse SSH tunnel to the relay VM as user `relay-<tenant>`, authenticated with a key generated on the next step. No password is used.",
+        "description": "Home Assistant opens a reverse SSH tunnel to the relay VM as user `relay-` followed by the tenant name, authenticated with a key generated on the next step. No password is used.",
         "data": {
           "relay_host": "Relay host",
           "ssh_port": "SSH port",
