@@ -1,0 +1,14 @@
+{
+  "tenants": {
+    "alice": {
+      "domain": "alice.duckdns.org",
+      "port": 18123,
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAlicePlaceholderReplaceWithTheIntegrationKey ha-alice"
+    },
+    "bob": {
+      "domain": "bob.duckdns.org",
+      "port": 18124,
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBobPlaceholderReplaceWithTheIntegrationKey0 ha-bob"
+    }
+  }
+}
