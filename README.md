@@ -36,11 +36,11 @@ phone/app ──TLS (SNI)──▶ relay :443 and :8123     nginx stream + ssl_p
 
 ## Install
 
-While the repository is private, download `ssh_relay.zip` from the [latest release](https://github.com/Gluxur/ha-ssh-relay/releases/latest), extract it into `/config/custom_components/` (you get `/config/custom_components/ssh_relay/`) and restart Home Assistant.
-
-Once the repository is public, it can be added to HACS as a custom repository (category *Integration*):
+Add this repository to HACS as a custom repository (category *Integration*), download **SSH Relay** and restart Home Assistant:
 
 [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Gluxur&repository=ha-ssh-relay&category=integration)
+
+Without HACS: download `ssh_relay.zip` from the [latest release](https://github.com/Gluxur/ha-ssh-relay/releases/latest), extract it into `/config/custom_components/` (you get `/config/custom_components/ssh_relay/`) and restart Home Assistant.
 
 Details: [docs/install-integration.md](docs/install-integration.md).
 

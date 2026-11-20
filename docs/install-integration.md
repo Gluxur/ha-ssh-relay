@@ -18,7 +18,19 @@ generates the key the relay needs.
 
 ## 1. Install
 
-### Manual copy (now)
+### HACS (recommended)
+
+1. HACS → ⋮ → **Custom repositories** → repository
+   `https://github.com/Gluxur/ha-ssh-relay`, type **Integration** → **Add**.
+2. Open **SSH Relay** in HACS → **Download**.
+3. Restart Home Assistant.
+
+HACS then offers new releases as updates.
+
+If you installed by hand before, delete `/config/custom_components/ssh_relay`
+first; your config entries are kept.
+
+### Manual copy
 
 1. Download `ssh_relay.zip` from the
    [latest release](https://github.com/Gluxur/ha-ssh-relay/releases/latest).
@@ -28,18 +40,6 @@ generates the key the relay needs.
 
 To update, replace the `ssh_relay` folder with the one of the new release and
 restart.
-
-### HACS (once the repository is public)
-
-HACS cannot install from a private repository. Once the repository is public:
-
-1. HACS → ⋮ → **Custom repositories** → repository
-   `https://github.com/Gluxur/ha-ssh-relay`, type **Integration** → **Add**.
-2. Open **SSH Relay** in HACS → **Download**.
-3. Restart Home Assistant.
-
-If you installed by hand before, delete `/config/custom_components/ssh_relay`
-first; your config entries are kept.
 
 ## 2. Add the integration
 
@@ -72,6 +72,12 @@ Replace `<your-domain>` with the name you reach Home Assistant at and send the
 entry to the relay admin (or add it yourself, then run `relay-setup.sh` or
 `terraform apply`). The public key is not secret; the private key never leaves
 Home Assistant.
+
+The key pair lives only in this setup dialog until the entry is created: if the
+dialog is closed or Home Assistant restarts ("Invalid flow specified"), starting
+over generates a **new** key, which must replace the old one on the relay.
+Either keep the dialog open until the relay admin has applied the key, or
+choose **Save anyway** at step 3 right away.
 
 ### Step 3: Test
 
