@@ -444,3 +444,131 @@ def test_restore_configs_atomic(tmp_path):
     assert "could not restore" in result.stderr
     assert not created.exists()
     assert not list(tmp_path.glob("*.restore.*"))
+
+
+def test_bare_gatewayports_refused(tmp_path):
+    """A "GatewayPorts yes" with no ha-tunnel section after it is not cut."""
+    target = tmp_path / "sshd_config"
+    shutil.copyfile(FIXTURES / "sshd_config_bare_gatewayports", target)
+    before = target.read_bytes()
+    for func in ("check_legacy_tail", "check_legacy_extractable", "strip_legacy_sshd"):
+        result = _bash(target.as_posix(), func=func)
+        assert result.returncode == 1, (func, result)
+        assert "GatewayPorts yes" in result.stderr
+    for mode in ("none", "keep", "lock"):
+        result = _bash(
+            target.as_posix(), _tenants_file(tmp_path, {"alice": T}), mode, func="write_sshd_match"
+        )
+        assert result.returncode == 1, (mode, result)
+    assert target.read_bytes() == before  # nothing written
+
+
+@pytest.mark.parametrize("fixture", [*sorted(LEGACY_BODIES), "sshd_config_legacy_unparsable"])
+def test_legacy_tail_ok(fixture):
+    result = _bash((FIXTURES / fixture).as_posix(), func="check_legacy_tail")
+    assert result.returncode == 0, result
+
+
+# Realistic "sshd -T" output (OpenSSH 8.9) for the admin user: unset options
+# are printed with their default, e.g. "forcecommand none".
+ADMIN_SSHD_T = """\
+passwordauthentication no
+gatewayports no
+allowtcpforwarding yes
+permitopen any
+permitlisten any
+forcecommand none
+"""
+
+
+def _verify_sshd(tmp_path, admin_output: str, admin: str | None = None):
+    (tmp_path / "admin.txt").write_bytes(admin_output.encode())
+    (tmp_path / "tenant.txt").write_bytes(
+        b"passwordauthentication no\nforcecommand /usr/sbin/nologin\npermitlisten 127.0.0.1:18123\n"
+    )
+    env = f"export RELAY_ADMIN_USER={admin}; " if admin else ""
+    code = (
+        f'{PRELUDE}{env}source {SCRIPT}; d=$1; '
+        'sshd() { case "$*" in *"user=relay-"*) cat "$d/tenant.txt" ;; *) echo "$*" >"$d/args"; cat "$d/admin.txt" ;; esac; }; '
+        'verify_sshd "$2"'
+    )
+    return _run(code, tmp_path.as_posix(), _tenants_file(tmp_path, {"alice": T}))
+
+
+def test_verify_sshd_forcecommand_none_ok(tmp_path):
+    result = _verify_sshd(tmp_path, ADMIN_SSHD_T)
+    assert result.returncode == 0, result
+    assert "user=ubuntu," in (tmp_path / "args").read_text()
+
+
+def test_verify_sshd_admin_forcecommand_refused(tmp_path):
+    output = ADMIN_SSHD_T.replace("forcecommand none", "forcecommand /usr/sbin/nologin")
+    result = _verify_sshd(tmp_path, output)
+    assert result.returncode == 1
+    assert "ForceCommand" in result.stderr
+
+
+def test_verify_sshd_admin_password_refused(tmp_path):
+    output = ADMIN_SSHD_T.replace("passwordauthentication no", "passwordauthentication yes")
+    result = _verify_sshd(tmp_path, output)
+    assert result.returncode == 1
+    assert "passwordauthentication" in result.stderr
+
+
+def test_verify_sshd_admin_user_override(tmp_path):
+    result = _verify_sshd(tmp_path, ADMIN_SSHD_T, admin="opc")
+    assert result.returncode == 0, result
+    assert "user=opc," in (tmp_path / "args").read_text()
+    assert "(opc)" in _verify_sshd(tmp_path, "forcecommand x\n", admin="opc").stderr
+
+
+def test_render_sshd_match_client_alive(tmp_path):
+    result = _bash(_tenants_file(tmp_path, {"alice": T}), func="render_sshd_match")
+    assert result.returncode == 0, result
+    lines = [line.strip() for line in result.stdout.splitlines()]
+    group = lines.index("Match Group ha-relay")
+    first_user = lines.index("Match User relay-alice")
+    assert group < lines.index("ClientAliveInterval 15") < first_user
+    assert group < lines.index("ClientAliveCountMax 3") < first_user
+
+
+def test_render_nginx_proxy_timeout(tmp_path):
+    result = _bash(_tenants_file(tmp_path, {"alice": T}), func="render_nginx")
+    assert result.returncode == 0, result
+    assert "    proxy_timeout 24h;" in result.stdout.splitlines()
+
+
+def test_prune_backups_keeps_five(tmp_path):
+    conf = tmp_path / "sshd_config"
+    conf.write_bytes(b"x\n")
+    stamps = [f"2026112000000{i}" for i in range(8)]
+    for stamp in stamps:
+        (tmp_path / f"sshd_config.bak.{stamp}").write_bytes(b"old\n")
+    other = tmp_path / "nginx.conf"  # no backup at all: nothing to do
+    result = _bash(conf.as_posix(), other.as_posix(), func="prune_backups")
+    assert result.returncode == 0, result
+    left = sorted(p.name for p in tmp_path.glob("sshd_config.bak.*"))
+    assert left == [f"sshd_config.bak.{s}" for s in stamps[-5:]]
+    assert conf.exists()
+
+
+def test_sync_users_defers_removals(tmp_path):
+    """sync_users only lists stale users; remove_stale_users deletes them."""
+    code = (
+        f'{PRELUDE}source {SCRIPT}; '
+        'getent() { case "$1" in group) echo "ha-relay:x:999:relay-alice,relay-old" ;; esac; }; '
+        'groupadd() { :; }; ensure_user() { echo "ensure $1"; }; '
+        'remove_user() { echo "remove $1"; }; '
+        'sync_users "$1" /stage; echo "stale ${STALE_USERS[*]}"; remove_stale_users'
+    )
+    result = _run(code, _tenants_file(tmp_path, {"alice": T}))
+    assert result.returncode == 0, result
+    assert result.stdout.splitlines() == ["ensure alice", "stale relay-old", "remove relay-old"]
+
+
+def test_on_exit_ignores_signals_during_rollback():
+    text = (ROOT / SCRIPT).read_text()
+    body = text[text.index("on_exit() {"):]
+    lines = body.splitlines()
+    assert lines[1].strip() == "local rc=$?"
+    assert "trap '' INT TERM HUP" in [line.strip() for line in lines[2:4]]

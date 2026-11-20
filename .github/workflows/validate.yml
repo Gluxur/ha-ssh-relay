@@ -48,6 +48,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: shellcheck relay/relay-setup.sh
+      - run: shellcheck -x tests/integration/sshd_check.sh
+
+  sshd:
+    name: Real sshd and nginx (Ubuntu 22.04)
+    runs-on: ubuntu-latest
+    # Same OpenSSH (8.9) and nginx as the relay VM image.
+    container: ubuntu:22.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server jq nginx libnginx-mod-stream
+      - run: bash tests/integration/sshd_check.sh
 
   terraform:
     name: Terraform

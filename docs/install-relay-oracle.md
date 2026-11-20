@@ -71,9 +71,9 @@ terraform apply
 
 The first apply creates the network, the VM (cloud-init installs nginx,
 `libnginx-mod-stream`, `iptables-persistent` and `jq`), the reserved IP and the
-budget, then copies `relay-setup.sh` and `tenants.json` to `/tmp` on the VM,
-waits for cloud-init to finish and runs
-`sudo bash /tmp/relay-setup.sh /tmp/tenants.json`. If SSH is not ready yet,
+budget, then copies `relay-setup.sh` and `tenants.json` to
+`/home/ubuntu/.ha-relay` (mode 700) on the VM, waits for cloud-init to finish
+and runs `sudo bash /home/ubuntu/.ha-relay/relay-setup.sh /home/ubuntu/.ha-relay/tenants.json`. If SSH is not ready yet,
 Terraform retries for a few minutes.
 
 The end of the output shows the relay host key fingerprint:

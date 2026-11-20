@@ -17,7 +17,11 @@
 
 set -euo pipefail
 
-SSHD_CONFIG=/etc/ssh/sshd_config
+# SSHD_CONFIG and RELAY_ADMIN_USER can be overridden from the environment
+# (tests/integration/sshd_check.sh checks a copy against a real sshd).
+SSHD_CONFIG=${SSHD_CONFIG:-/etc/ssh/sshd_config}
+# Admin account that must keep its login (no ForceCommand, no password).
+RELAY_ADMIN_USER=${RELAY_ADMIN_USER:-ubuntu}
 SSHD_GLOBAL=/etc/ssh/sshd_config.d/00-ha-relay.conf
 NGINX_CONF=/etc/nginx/nginx.conf
 NGINX_STREAM_DIR=/etc/nginx/stream.d
@@ -150,6 +154,8 @@ Match Group ha-relay
     AllowAgentForwarding no
     PermitTTY no
     ForceCommand /usr/sbin/nologin
+    ClientAliveInterval 15
+    ClientAliveCountMax 3
 EOF
   while IFS=$'\t' read -r name port; do
     [[ -n "$name" ]] || continue
@@ -181,7 +187,8 @@ render_nginx() {
   fi
   # shellcheck disable=SC2016
   printf '    ssl_preread on;\n    proxy_pass $ha_relay_upstream;\n'
-  printf '    proxy_connect_timeout 5s;\n}\n'
+  # Home Assistant websockets can stay idle for a long time.
+  printf '    proxy_connect_timeout 5s;\n    proxy_timeout 24h;\n}\n'
 }
 
 # render_authorized_keys <file> <name>
@@ -215,16 +222,33 @@ LEGACY_LOCKED_BODY='    AllowTcpForwarding no
     PermitTTY no
     ForceCommand /usr/sbin/nologin'
 
+# check_legacy_tail <file>: the unmarked tail (first "GatewayPorts yes" line
+# outside the markers to the end of the file) is only the password-era block
+# when it has a "Match User ha-tunnel" section; fails on a bare
+# "GatewayPorts yes", which strip_legacy_sshd must not cut.
+check_legacy_tail() {
+  local file=$1 tail
+  tail=$(sed -e "/^$BEGIN_MARK\$/,/^$END_MARK\$/d" "$file" | sed -n '/^GatewayPorts yes$/,$p') || return 1
+  [[ -n "$tail" ]] || return 0
+  if ! grep -Eiq "^[[:space:]]*match[[:space:]]+user[[:space:]]+([^[:space:]]*,)?$LEGACY_USER([,[:space:]]|\$)" <<<"$tail"; then
+    printf '%s: "GatewayPorts yes" without a "Match User %s" section after it is not the legacy block; fix it by hand\n' \
+      "$file" "$LEGACY_USER" >&2
+    return 1
+  fi
+}
+
 # strip_legacy_sshd <file>: removes, in place, the marked block and everything
 # from the first "GatewayPorts yes" line to the end of the file (the
-# password-era block, same rule as migrate-to-key-auth.sh). Trailing blank
-# lines are dropped so that strip + append is stable.
+# password-era block, same rule as migrate-to-key-auth.sh; refused when that
+# tail has no ha-tunnel section). Trailing blank lines are dropped so that
+# strip + append is stable.
 strip_legacy_sshd() {
   local file=$1 tmp
   if grep -qx "$BEGIN_MARK" "$file" && ! grep -qx "$END_MARK" "$file"; then
     printf '%s: "%s" without "%s", fix it by hand\n' "$file" "$BEGIN_MARK" "$END_MARK" >&2
     return 1
   fi
+  check_legacy_tail "$file" || return 1
   tmp=$(mktemp) || return 1
   if ! sed -e "/^$BEGIN_MARK\$/,/^$END_MARK\$/d" -e '/^GatewayPorts yes$/,$d' "$file" \
     | awk '/^[[:space:]]*$/ { blank = blank $0 "\n"; next }
@@ -274,6 +298,7 @@ extract_legacy_sshd() {
 # legacy user would otherwise silently drop its config.
 check_legacy_extractable() {
   local removed body
+  check_legacy_tail "$1" || return 1
   removed=$(sed -n -e "/^$BEGIN_MARK\$/,/^$END_MARK\$/p" -e '/^GatewayPorts yes$/,$p' "$1") || return 1
   [[ "$removed" == *"$LEGACY_USER"* ]] || return 0
   body=$(extract_legacy_sshd "$1") || return 1
@@ -446,6 +471,21 @@ backup_configs() {
   log "backups: ${BACKUPS[*]}"
 }
 
+# prune_backups <file>...: keeps the 5 most recent <file>.bak.* (the timestamp
+# sorts as text), after a successful run.
+prune_backups() {
+  local f b baks i
+  for f in "$@"; do
+    baks=()
+    for b in "$f".bak.*; do
+      if [[ -e "$b" ]]; then baks+=("$b"); fi
+    done
+    for ((i = 0; i < ${#baks[@]} - 5; i++)); do
+      rm -f "${baks[$i]}"
+    done
+  done
+}
+
 # Each file is copied to a temp file in its own directory, then renamed over
 # the original: a failed copy never leaves e.g. sshd_config missing.
 restore_configs() {
@@ -471,6 +511,8 @@ restore_configs() {
 # listeners are checked), any exit restores the backups and the services.
 on_exit() {
   local rc=$?
+  # A second ^C or HUP must not abort the rollback.
+  trap '' INT TERM HUP
   if ((ROLLBACK_ARMED)); then
     ROLLBACK_ARMED=0
     warn "apply failed; restoring the previous configuration"
@@ -516,6 +558,11 @@ remove_user() {
   userdel -r "$user"
 }
 
+# sync_users creates and updates the tenants' users, and lists in STALE_USERS
+# the relay-<name> users no tenant wants: remove_stale_users deletes them once
+# the new configuration is checked and loaded (removals are not rolled back).
+STALE_USERS=()
+
 sync_users() {
   local file=$1 stage=$2 name user members
   local -A wanted=()
@@ -530,8 +577,15 @@ sync_users() {
     if [[ "$user" != relay-?* ]]; then
       warn "$user is in group $RELAY_GROUP but is not a relay-<name> user; left alone"
     elif [[ -z "${wanted[${user#relay-}]:-}" ]]; then
-      remove_user "$user"
+      STALE_USERS+=("$user")
     fi
+  done
+}
+
+remove_stale_users() {
+  local user
+  for user in "${STALE_USERS[@]}"; do
+    remove_user "$user"
   done
 }
 
@@ -574,21 +628,22 @@ configure_firewall() {
 
 # ── Checks and reloads ────────────────────────────────────────────────────────
 
-# Admin user intact, each tenant limited to its own port.
+# Admin user intact, each tenant limited to its own port. sshd -T prints every
+# option, unset ones with their default value ("forcecommand none").
 verify_sshd() {
   local file=$1 out name port
-  out=$(sshd -T -C user=ubuntu,host=x,addr=1.2.3.4) || return 1
+  out=$(sshd -T -f "$SSHD_CONFIG" -C "user=$RELAY_ADMIN_USER,host=x,addr=1.2.3.4") || return 1
   if ! grep -qx 'passwordauthentication no' <<<"$out"; then
-    printf 'sshd -T (ubuntu): passwordauthentication is not "no"\n' >&2
+    printf 'sshd -T (%s): passwordauthentication is not "no"\n' "$RELAY_ADMIN_USER" >&2
     return 1
   fi
-  if grep -q '^forcecommand' <<<"$out"; then
-    printf 'sshd -T (ubuntu): a ForceCommand applies to the admin user\n' >&2
+  if grep -q '^forcecommand ' <<<"$out" && ! grep -qx 'forcecommand none' <<<"$out"; then
+    printf 'sshd -T (%s): a ForceCommand applies to the admin user\n' "$RELAY_ADMIN_USER" >&2
     return 1
   fi
   while IFS=$'\t' read -r name port; do
     [[ -n "$name" ]] || continue
-    out=$(sshd -T -C "user=relay-$name,host=x,addr=1.2.3.4") || return 1
+    out=$(sshd -T -f "$SSHD_CONFIG" -C "user=relay-$name,host=x,addr=1.2.3.4") || return 1
     if ! grep -qx "permitlisten 127.0.0.1:$port" <<<"$out"; then
       printf 'sshd -T (relay-%s): permitlisten 127.0.0.1:%s missing\n' "$name" "$port" >&2
       return 1
@@ -631,7 +686,7 @@ verify_legacy_sshd() {
     keep) grep -qx "Match User $LEGACY_USER" "$SSHD_CONFIG" || return 0 ;;
     *) return 0 ;;
   esac
-  out=$(sshd -T -C "user=$LEGACY_USER,host=x,addr=1.2.3.4") || return 1
+  out=$(sshd -T -f "$SSHD_CONFIG" -C "user=$LEGACY_USER,host=x,addr=1.2.3.4") || return 1
   check_legacy_effective "$LEGACY_MODE" <<<"$out"
 }
 
@@ -639,7 +694,7 @@ verify_legacy_sshd() {
 check_configs() {
   local file=$1
   install -d -m 755 /run/sshd
-  sshd -t || die "sshd -t failed"
+  sshd -t -f "$SSHD_CONFIG" || die "sshd -t failed"
   nginx -t || die "nginx -t failed"
   verify_sshd "$file" || die "sshd verification failed"
   verify_legacy_sshd || die "sshd verification of $LEGACY_USER failed"
@@ -743,6 +798,7 @@ main() {
   if [[ "$LEGACY_MODE" == keep ]] && ! check_legacy_extractable "$SSHD_CONFIG"; then
     die "refusing to touch $SSHD_CONFIG: the $LEGACY_USER config would be lost"
   fi
+  check_legacy_tail "$SSHD_CONFIG" || die "refusing to touch $SSHD_CONFIG"
   check_ports_free
   backup_configs
   ROLLBACK_ARMED=1                            # from here, any exit rolls back
@@ -756,6 +812,8 @@ main() {
   reload_nginx
   check_listeners                             # 8
   ROLLBACK_ARMED=0
+  remove_stale_users                          # not rolled back
+  prune_backups "$SSHD_CONFIG" "$SSHD_GLOBAL" "$NGINX_CONF" "$NGINX_RELAY_CONF"
   show_fingerprint                            # 9
 }
 

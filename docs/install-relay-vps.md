@@ -55,8 +55,12 @@ ls ./preview   # sshd_global.conf  sshd_match.conf  nginx.conf  authorized_keys/
 
 ```bash
 scp relay/relay-setup.sh tenants.json admin@relay.example.com:
-ssh admin@relay.example.com sudo bash relay-setup.sh tenants.json
+ssh admin@relay.example.com sudo env RELAY_ADMIN_USER=admin bash relay-setup.sh tenants.json
 ```
+
+`RELAY_ADMIN_USER` names your admin account (default `ubuntu`): the script
+checks that it keeps its login (step 7). Leave it out if you log in as
+`ubuntu`.
 
 In order, the script:
 
@@ -65,8 +69,7 @@ In order, the script:
    invalid (`tenant <name>: <reason>`);
 3. creates or updates each `relay-<name>` user (group `ha-relay`, shell
    `nologin`, locked password, `authorized_keys` with
-   `restrict,port-forwarding,permitlisten="127.0.0.1:<port>"`), and removes
-   the `ha-relay` users no longer in the list, after cutting their sessions;
+   `restrict,port-forwarding,permitlisten="127.0.0.1:<port>"`);
 4. writes `/etc/ssh/sshd_config.d/00-ha-relay.conf` (`PasswordAuthentication no`)
    and the `Match` blocks at the end of `/etc/ssh/sshd_config`, between
    `# BEGIN ha-relay` and `# END ha-relay`;
@@ -75,10 +78,12 @@ In order, the script:
    includes it from `nginx.conf`;
 6. accepts 22, 443 and 8123 in iptables and saves the rules;
 7. checks `sshd -t`, `nginx -t`, and with `sshd -T` that an admin login
-   (checked as user `ubuntu`) gets no `ForceCommand` and no password login, and
+   (checked as user `RELAY_ADMIN_USER`, default `ubuntu`) gets no
+   `ForceCommand` and no password login, and
    that each tenant can only listen on its port, then
    reloads sshd (open sessions stay up) and nginx;
-8. checks that nginx really listens on 443 and 8123;
+8. checks that nginx really listens on 443 and 8123, then removes the
+   `ha-relay` users no longer in the list, after cutting their sessions;
 9. prints the host key fingerprint:
 
    ```
@@ -86,9 +91,12 @@ In order, the script:
    256 SHA256:... root@relay (ED25519)
    ```
 
-Every modified file is backed up next to itself (`<file>.bak.<timestamp>`).
+Every modified file is backed up next to itself (`<file>.bak.<timestamp>`);
+after a successful run, only the 5 most recent backups of each file are kept.
 From the first write until the listeners are checked, any failure (or `^C`, or
-a dropped SSH session) restores those backups and the services.
+a dropped SSH session) restores those backups and the services. User removals
+happen only after that point, once the new configuration is loaded, and are
+not rolled back.
 
 Exit codes: `0` on success; `1` on an invalid list, a usage error or a failed
 step (after rollback); `130` when interrupted.
@@ -104,8 +112,9 @@ fingerprint printed by the script.
 ## Change the tenants
 
 Edit `tenants.json`, copy it again and run the script again. Adding a tenant
-creates its user; removing one cuts its sessions and deletes its user; a new
-key replaces the old one.
+creates its user; removing one cuts its sessions and deletes its user (with its
+home, once the new configuration is in place; not rolled back); a new key
+replaces the old one.
 
 ## Legacy `ha-tunnel` user
 

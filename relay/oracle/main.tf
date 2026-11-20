@@ -201,21 +201,27 @@ resource "terraform_data" "relay_config" {
     private_key = file(var.admin_ssh_private_key_path)
   }
 
+  # A private directory of the admin, not /tmp: nobody else can swap the
+  # script between the upload and the sudo run.
+  provisioner "remote-exec" {
+    inline = ["install -d -m 700 /home/ubuntu/.ha-relay"]
+  }
+
   provisioner "file" {
     source      = "${path.module}/../relay-setup.sh"
-    destination = "/tmp/relay-setup.sh"
+    destination = "/home/ubuntu/.ha-relay/relay-setup.sh"
   }
 
   provisioner "file" {
     content     = jsonencode({ tenants = var.tenants })
-    destination = "/tmp/tenants.json"
+    destination = "/home/ubuntu/.ha-relay/tenants.json"
   }
 
   provisioner "remote-exec" {
     inline = [
       # First boot: let cloud-init finish its apt-get (dpkg lock) first.
       "sudo timeout 900 cloud-init status --wait > /dev/null || true",
-      "sudo bash /tmp/relay-setup.sh ${var.remove_legacy ? "--remove-legacy " : ""}/tmp/tenants.json",
+      "sudo bash /home/ubuntu/.ha-relay/relay-setup.sh ${var.remove_legacy ? "--remove-legacy " : ""}/home/ubuntu/.ha-relay/tenants.json",
     ]
   }
 }

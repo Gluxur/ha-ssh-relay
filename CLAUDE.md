@@ -16,11 +16,12 @@ User docs: `README.md`, `docs/install-*.md`, `docs/migration-from-ssh-tunnel.md`
 ```bash
 pip install -r requirements_test.txt   # pytest, pytest-asyncio, asyncssh — no homeassistant
 pytest                                 # all tests (asyncio_mode = auto, see pytest.ini)
-shellcheck relay/relay-setup.sh
+shellcheck relay/relay-setup.sh && shellcheck -x tests/integration/sshd_check.sh
+# real OpenSSH 8.9 / nginx check (root, throwaway Ubuntu 22.04 container; see the script header)
 terraform -chdir=relay/oracle fmt -check && terraform -chdir=relay/oracle init -backend=false && terraform -chdir=relay/oracle validate
 ```
 
-CI (`.github/workflows/validate.yml`) runs HACS validation, hassfest, pytest, shellcheck and terraform fmt/validate. The HACS job is gated with `if: ${{ (github.event.repository && !github.event.repository.private) || vars.REPO_PUBLIC == 'true' }}`: HACS cannot read a private repository, so it is skipped while the repo is private. Push/PR/dispatch payloads carry `repository.private`; the `schedule` payload has no `repository`, so the weekly run only validates HACS once the repository variable `REPO_PUBLIC` is set to `true` (set it when making the repo public: `gh variable set REPO_PUBLIC --body true`).
+CI (`.github/workflows/validate.yml`) runs HACS validation, hassfest, pytest, shellcheck, `tests/integration/sshd_check.sh` (in an `ubuntu:22.04` container: the written sshd config is checked by the real `sshd -t`/`sshd -T`, the nginx config by `nginx -t`) and terraform fmt/validate. The HACS job is gated with `if: ${{ (github.event.repository && !github.event.repository.private) || vars.REPO_PUBLIC == 'true' }}`: HACS cannot read a private repository, so it is skipped while the repo is private. Push/PR/dispatch payloads carry `repository.private`; the `schedule` payload has no `repository`, so the weekly run only validates HACS once the repository variable `REPO_PUBLIC` is set to `true` (set it when making the repo public: `gh variable set REPO_PUBLIC --body true`).
 
 ## Rules
 

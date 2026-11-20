@@ -37,7 +37,11 @@ Also check how the current `ssh_tunnel` integration really authenticates
 removes them before writing its own block:
 
 - a block between `# BEGIN ha-relay` and `# END ha-relay`;
-- an unmarked block from a `GatewayPorts yes` line to the end of the file.
+- an unmarked block from a `GatewayPorts yes` line to the end of the file,
+  with a `Match User ha-tunnel` section in it. A `GatewayPorts yes` without
+  such a section is not taken for the old block: the script refuses to run
+  (`"GatewayPorts yes" without a "Match User ha-tunnel" section after it is not
+  the legacy block; fix it by hand`) before changing anything.
 
 The `Match User ha-tunnel` section found there is carried over **verbatim**
 until `--remove-legacy`. If the file looks different, the script refuses to
@@ -100,8 +104,14 @@ is still held by the old tunnel, so it prints, and still succeeds:
 relay-setup: WARNING: 8123 held by ha-tunnel (legacy); run with --remove-legacy to take it over
 ```
 
-No cut. Optionally, turn SSH Relay on now and check `https://<domain>` (port
-443) from outside: both tunnels can run side by side.
+No cut. Then turn SSH Relay's **Enabled** switch on and check
+`https://<domain>:443` from outside: the new tunnel serves 443 before the
+switch, side by side with the old one on 8123.
+
+If the old tunnel was down during the run (no warning), nginx took 8123
+already, and the old tunnel can no longer bind it when it comes back: go
+straight to the switch (step 4). With SSH Relay on, `https://<domain>:8123`
+works as soon as nginx holds 8123.
 
 ## 4. Switch (a few minutes)
 
@@ -118,7 +128,7 @@ its session, and nginx takes 8123. `ha-tunnel` and its `authorized_keys` are
 kept. Then, in Home Assistant:
 
 1. disable `ssh_tunnel`;
-2. turn SSH Relay's **Enabled** switch on;
+2. make sure SSH Relay's **Enabled** switch is on (from step 3);
 3. check that its status is `connected` and that `host_key_fingerprint` matches
    the fingerprint printed by the script;
 4. open `https://<domain>:8123` from outside, and the mobile app.
@@ -145,7 +155,8 @@ Home Assistant.
 
 `ha-tunnel` and its key are still there. Each run of the script backs up the
 files it changes next to them, with the same timestamp. Restore the backups of
-the step 4 run (`--remove-legacy`), which hold the pre-switch configuration:
+the step 4 run (`--remove-legacy`), which hold the pre-switch configuration
+(only the 5 most recent backups of each file are kept):
 
 ```bash
 ls /etc/ssh/sshd_config.bak.* /etc/nginx/stream.d/ha-relay.conf.bak.*
