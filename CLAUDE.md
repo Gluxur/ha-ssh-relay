@@ -23,6 +23,8 @@ terraform -chdir=relay/oracle fmt -check && terraform -chdir=relay/oracle init -
 
 CI (`.github/workflows/validate.yml`) runs HACS validation, hassfest, pytest, shellcheck, `tests/integration/sshd_check.sh` (in an `ubuntu:22.04` container: the written sshd config is checked by the real `sshd -t`/`sshd -T`, the nginx config by `nginx -t`) and terraform fmt/validate. The HACS job is gated with `if: ${{ (github.event.repository && !github.event.repository.private) || vars.REPO_PUBLIC == 'true' }}`: HACS cannot read a private repository, so it is skipped while the repo is private. Push/PR/dispatch payloads carry `repository.private`; the `schedule` payload has no `repository`, so the weekly run only validates HACS once the repository variable `REPO_PUBLIC` is set to `true` (set it when making the repo public: `gh variable set REPO_PUBLIC --body true`).
 
+`.github/workflows/zizmor.yml` audits the workflows with zizmor (SARIF to code scanning) and `.github/dependabot.yml` updates actions, pip test deps and the OCI provider weekly. Pin every action by commit SHA with a `# vX.Y.Z` comment and keep `persist-credentials: false` on checkout; check locally with `uvx zizmor --pedantic .github/`.
+
 ## Rules
 
 - `tunnel.py` must stay free of Home Assistant imports (and relative imports): tests load it by file path, since Home Assistant is not installed in the test environment.
